@@ -17,7 +17,7 @@ public static class AudioPropagationExports
 {
     private const int Ok = 0;
 
-    // audio_propagation.h: int32_t sceAudioPropagationSystemQueryMemory(
+    // ABI: int32_t sceAudioPropagationSystemQueryMemory(
     //   const SceAudioPropagationSystemOption *pOptions,
     //   SceAudioPropagationSystemMemory *pOutMemorySize).
     // SceAudioPropagationSystemMemory is NOT a {size, alignment} pair: it is
@@ -42,7 +42,7 @@ public static class AudioPropagationExports
         var outAddress = ctx[CpuRegister.Rsi];
         if (outAddress == 0)
         {
-            // audio_propagation/error.h: SCE_AUDIO_PROPAGATION_ERROR_INVALID_POINTER.
+            // SCE_AUDIO_PROPAGATION_ERROR_INVALID_POINTER.
             return ctx.SetReturn(unchecked((int)0x8A70_0003));
         }
 

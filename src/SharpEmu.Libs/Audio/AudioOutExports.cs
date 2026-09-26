@@ -12,10 +12,10 @@ namespace SharpEmu.Libs.Audio;
 
 public static class AudioOutExports
 {
-    // audioout.h: SceAudioOutOutputParam { int32_t handle; int32_t : 32; void *ptr; }.
+    // ABI: SceAudioOutOutputParam { int32_t handle; int32_t : 32; void *ptr; }.
     private const int AudioOutOutputParamSize = 16;
     private const int AudioOutMaximumOutputCount = 25;
-    // audioout.h: SceAudioOutPortState { u16 output; u8 channel; u8 reserved8_1[1];
+    // ABI: SceAudioOutPortState { u16 output; u8 channel; u8 reserved8_1[1];
     // s16 volume; u16 rerouteCounter; u64 flag; u64 reserved64[2]; }.
     private const int AudioOutPortStateSize = 0x20;
     private const ushort AudioOutStateOutputConnectedPrimary = 1 << 0;
@@ -234,7 +234,7 @@ public static class AudioOutExports
             return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        // audioout.h: int32_t sceAudioOutGetPortState(int32_t handle,
+        // ABI: int32_t sceAudioOutGetPortState(int32_t handle,
         // SceAudioOutPortState *state) — rsi is the only out pointer and the write
         // is exactly sizeof(SceAudioOutPortState):
         //   +0x00 u16 output          = STATE_OUTPUT_CONNECTED_PRIMARY
