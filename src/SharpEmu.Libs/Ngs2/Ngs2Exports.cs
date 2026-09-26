@@ -15,9 +15,9 @@ public static class Ngs2Exports
     private const int OrbisNgs2ErrorInvalidSystemHandle = unchecked((int)0x804A0230);
     private const int OrbisNgs2ErrorInvalidRackHandle = unchecked((int)0x804A0261);
     private const int OrbisNgs2ErrorInvalidVoiceHandle = unchecked((int)0x804A0300);
-    // ngs2/ngs2_errors.h waveform-parse codes. Note the PS5 SDK error base is
-    // 0x804A80xx while the PS4 library (and OrbisNgs2ErrorInvalidOutAddress above)
-    // used 0x804A00xx; the parse APIs only exist with the newer numbering.
+    // Waveform-parse error codes. The PS5 error base is 0x804A80xx while the PS4
+    // library (and OrbisNgs2ErrorInvalidOutAddress above) used 0x804A00xx; the parse
+    // APIs only exist with the newer numbering.
     private const int OrbisNgs2ErrorInvalidParseOutAddress = unchecked((int)0x804A8010);
     private const int OrbisNgs2ErrorInvalidWaveformAddress = unchecked((int)0x804A8055);
     private const int OrbisNgs2ErrorInvalidWaveformData = unchecked((int)0x804A8430);
@@ -910,7 +910,7 @@ public static class Ngs2Exports
         }
     }
 
-    // ngs2_core.h: int32_t sceNgs2ParseWaveformData(const void *data, size_t dataSize,
+    // ABI: int32_t sceNgs2ParseWaveformData(const void *data, size_t dataSize,
     // SceNgs2WaveformInfo *outInfo).
     [SysAbiExport(
         Nid = "hyVLT2VlOYk",
@@ -952,7 +952,7 @@ public static class Ngs2Exports
         }
     }
 
-    // ngs2_core.h: int32_t sceNgs2ParseWaveformFile(const char *path, uint64_t offset,
+    // ABI: int32_t sceNgs2ParseWaveformFile(const char *path, uint64_t offset,
     // SceNgs2WaveformInfo *outInfo).
     [SysAbiExport(
         Nid = "iprCTXPVWMI",
@@ -1001,7 +1001,7 @@ public static class Ngs2Exports
         return WriteParsedWaveform(ctx, header, (ulong)fileLength - offset, outInfoAddress);
     }
 
-    // ngs2_core.h: int32_t sceNgs2ParseWaveformUser(SceNgs2ParseReadHandler handler,
+    // ABI: int32_t sceNgs2ParseWaveformUser(SceNgs2ParseReadHandler handler,
     // uintptr_t userData, SceNgs2WaveformInfo *outInfo). The handler is a guest
     // callback, which this HLE cannot drive, so report the data as unparsable
     // rather than publishing a fabricated description.

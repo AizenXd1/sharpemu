@@ -8,8 +8,8 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Ngs2;
 
-// sceNgs2ParseWaveformData against the SceNgs2WaveformInfo layout in
-// ngs2/ngs2_core.h. Void Terrarium calls this on its audio thread for every
+// sceNgs2ParseWaveformData against the SceNgs2WaveformInfo layout the libNgs2
+// ABI defines. Void Terrarium calls this on its audio thread for every
 // sound it loads, so a fabricated or mis-sized description is felt immediately.
 public sealed class Ngs2ParseWaveformExportsTests
 {
@@ -17,7 +17,7 @@ public sealed class Ngs2ParseWaveformExportsTests
     private const ulong DataAddress = MemoryBase + 0x100;
     private const ulong InfoAddress = MemoryBase + 0x800;
 
-    // ngs2_core.h waveform types.
+    // libNgs2 waveform types.
     private const uint WaveformTypePcmI16L = 0x12;
     private const uint WaveformTypeVag = 0x1C;
     // sizeof(SceNgs2WaveformInfo).

@@ -8,11 +8,11 @@ namespace SharpEmu.Libs.Ngs2;
 
 // Builds SceNgs2WaveformInfo out of a raw waveform image, the way
 // sceNgs2ParseWaveformData/File/User do. Layout and every derived quantity come
-// from ngs2/ngs2_core.h (SceNgs2WaveformFormat, SceNgs2WaveformBlock,
+// from the libNgs2 ABI (SceNgs2WaveformFormat, SceNgs2WaveformBlock,
 // SceNgs2WaveformInfo and the audio-unit table documented on the info fields).
 internal static class Ngs2WaveformParser
 {
-    // ngs2_core.h waveform types.
+    // libNgs2 waveform types.
     internal const uint WaveformTypePcmI8 = 0x10;
     internal const uint WaveformTypePcmU8 = 0x11;
     internal const uint WaveformTypePcmI16L = 0x12;
@@ -148,7 +148,7 @@ internal static class Ngs2WaveformParser
     }
 
     // Classic Sony "VAGp" container: 0x30-byte big-endian header, then 16-byte
-    // PS-ADPCM units. ngs2_core.h maps this onto SCE_NGS2_WAVEFORM_TYPE_VAG with
+    // PS-ADPCM units. libNgs2 maps this onto SCE_NGS2_WAVEFORM_TYPE_VAG with
     // 28 samples per unit.
     private static bool TryParseVag(ReadOnlySpan<byte> data, ref WaveformInfo info)
     {
@@ -390,7 +390,7 @@ internal static class Ngs2WaveformParser
         return true;
     }
 
-    // ngs2_core.h: audioFrameSize = audioUnitSize x numAudioUnitPerFrame and
+    // ABI: audioFrameSize = audioUnitSize x numAudioUnitPerFrame and
     // numAudioFrameSamples = numAudioUnitSamples x numAudioUnitPerFrame.
     private static void FinishDerivedFields(ref WaveformInfo info)
     {
