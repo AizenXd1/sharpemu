@@ -739,8 +739,108 @@ internal static unsafe partial class VulkanVideoPresenter
             return destination;
         }
         // Captures the display surface through the store in queue order; presentation reads the copy.
+        // A flip snapshot is created and retired for every flip; on macOS that is a
+        // vkCreateImage plus a vkAllocateMemory (and a Metal texture) about twenty
+        // times a second for the same 1920x1080 target. Keep the retired ones and
+        // hand them back: a snapshot is fully overwritten by the copy that follows
+        // (its barrier takes it from Undefined), so its old contents and layout do
+        // not matter.
+        // The command-stream thread takes snapshots and the render thread retires
+        // them, so the pool is guarded.
+        private readonly Dictionary<(Format Format, uint Width, uint Height), Stack<GuestImageResource>>
+            _flipSnapshotPool = new();
+        private readonly object _flipSnapshotPoolGate = new();
+        private int _pooledFlipSnapshots;
+        // SHARPEMU_FLIP_SNAPSHOT_POOL=0 turns the pool off; it is on otherwise.
+        private bool _flipSnapshotPoolOpen =
+            !string.Equals(
+                Environment.GetEnvironmentVariable("SHARPEMU_FLIP_SNAPSHOT_POOL"),
+                "0",
+                StringComparison.Ordinal);
+        private const int MaxPooledFlipSnapshots = 8;
+
+        private bool TryTakePooledFlipSnapshot(
+            Format format,
+            uint width,
+            uint height,
+            ulong address,
+            long version,
+            out GuestImageResource snapshot)
+        {
+            lock (_flipSnapshotPoolGate)
+            {
+                snapshot = null!;
+                if (!_flipSnapshotPoolOpen ||
+                    !_flipSnapshotPool.TryGetValue((format, width, height), out var available) ||
+                    available.Count == 0)
+                {
+                    return false;
+                }
+
+                snapshot = available.Pop();
+                _pooledFlipSnapshots--;
+            }
+
+            snapshot.Address = address;
+            snapshot.FlipVersion = version;
+            return true;
+        }
+
+        private bool TryPoolFlipSnapshot(GuestImageResource resource)
+        {
+            lock (_flipSnapshotPoolGate)
+            {
+                if (!_flipSnapshotPoolOpen || resource.Image.Handle == 0 || resource.Memory.Handle == 0 ||
+                    _pooledFlipSnapshots >= MaxPooledFlipSnapshots)
+                {
+                    return false;
+                }
+
+                var key = (resource.Format, resource.Width, resource.Height);
+                if (!_flipSnapshotPool.TryGetValue(key, out var available))
+                {
+                    available = new Stack<GuestImageResource>();
+                    _flipSnapshotPool[key] = available;
+                }
+
+                resource.Address = 0;
+                resource.FlipVersion = 0;
+                available.Push(resource);
+                _pooledFlipSnapshots++;
+                return true;
+            }
+        }
+
+        // Closes the pool and hands every kept snapshot back for a real destroy.
+        private void DrainFlipSnapshotPool()
+        {
+            List<GuestImageResource> kept = [];
+            lock (_flipSnapshotPoolGate)
+            {
+                _flipSnapshotPoolOpen = false;
+                foreach (var available in _flipSnapshotPool.Values)
+                {
+                    kept.AddRange(available);
+                }
+
+                _flipSnapshotPool.Clear();
+                _pooledFlipSnapshots = 0;
+            }
+
+            foreach (var resource in kept)
+            {
+                DestroyGuestImage(resource);
+            }
+        }
+
         private GuestImageResource CreateGuestFlipSnapshot(Format format, uint width, uint height, ulong address, long version)
         {
+            if (TryTakePooledFlipSnapshot(format, width, height, address, version, out var pooled))
+            {
+                SetDebugName(ObjectType.Image, pooled.Image.Handle, $"guest flip v{version} source 0x{address:X16}");
+                return pooled;
+            }
+
             var imageInfo = new ImageCreateInfo
             {
                 SType = StructureType.ImageCreateInfo,
