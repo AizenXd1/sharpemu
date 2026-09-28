@@ -66,6 +66,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 owner._preparation = null;
+                owner._preparedTextures.Clear();
                 streamRetention.Dispose();
                 if (StencilStorageImages is { } stencilImages)
                 {
