@@ -6883,6 +6883,19 @@ public static partial class KernelMemoryCompatExports
         return TryWriteHostPathStat(ctx, statAddress, hostPath, isDirectory);
     }
 
+    // /app0 is the read-only game image, so a path that is not in it now will not
+    // appear later. Remembering the absent ones turns a repeated pair of host stats
+    // on the (slow, external) game volume into a dictionary probe; Demon's Souls
+    // resolves tens of thousands of paths per boot and misses are the common case.
+    private static readonly ConcurrentDictionary<string, byte> _aprMissingImagePaths = new(HostFsPath.Comparer);
+
+    private static bool IsUnderApp0(string cachePath)
+    {
+        var app0Root = ResolveApp0Root();
+        return !string.IsNullOrWhiteSpace(app0Root) &&
+            cachePath.StartsWith(Path.TrimEndingDirectorySeparator(app0Root) + Path.DirectorySeparatorChar, HostFsPath.Comparison);
+    }
+
     private static bool TryGetAprFileSize(string hostPath, out ulong size)
     {
         size = 0;
@@ -6900,6 +6913,11 @@ public static partial class KernelMemoryCompatExports
         if (_aprFileSizeCache.TryGetValue(cachePath, out size))
         {
             return true;
+        }
+
+        if (_aprMissingImagePaths.ContainsKey(cachePath))
+        {
+            return false;
         }
 
         // One directory listing returns every file's size; titles resolve whole asset
@@ -6936,6 +6954,11 @@ public static partial class KernelMemoryCompatExports
 
             if (!new DirectoryInfo(cachePath).Exists)
             {
+                if (IsUnderApp0(cachePath))
+                {
+                    _aprMissingImagePaths.TryAdd(cachePath, 0);
+                }
+
                 return false;
             }
 
