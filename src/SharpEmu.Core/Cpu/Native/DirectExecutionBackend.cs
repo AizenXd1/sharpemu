@@ -661,18 +661,30 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			finally
 			{
 				GuestThreadExecution.RestoreGuestThread(previousGuestThreadHandle);
+				_workAvailable.Dispose();
+			}
+		}
+
+		public void RequestStop()
+		{
+			lock (_gate)
+			{
+				if (_stopping)
+				{
+					return;
+				}
+				_stopping = true;
+				_workAvailable.Set();
 			}
 		}
 
 		public void Dispose()
 		{
-			_stopping = true;
-			_workAvailable.Set();
+			RequestStop();
 			if (!ReferenceEquals(Thread.CurrentThread, _thread))
 			{
 				_thread.Join(500);
 			}
-			_workAvailable.Dispose();
 		}
 	}
 
@@ -717,6 +729,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private int _readyGuestThreadCount;
 
 	private readonly Dictionary<ulong, GuestThreadState> _guestThreads = new Dictionary<ulong, GuestThreadState>();
+	private readonly Queue<(IVirtualMemory Memory, ulong StackBase, ulong StackSize, ulong TlsBase)> _reusableGuestThreadRegions = new();
 
 	private readonly Dictionary<ulong, ExternalGuestThreadState> _externalGuestThreads = new Dictionary<ulong, ExternalGuestThreadState>();
 
@@ -5342,6 +5355,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			_readyGuestThreads.Clear();
 			Interlocked.Exchange(ref _readyGuestThreadCount, 0);
 			_guestThreads.Clear();
+			_reusableGuestThreadRegions.Clear();
 			_externalGuestThreads.Clear();
 			_pendingGuestExceptions.Clear();
 			Volatile.Write(ref _pendingGuestExceptionCount, 0);
@@ -5380,13 +5394,50 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			stackSize = GuestThreadStackSize;
 		}
 
-		if (!TryMapGuestThreadRegion(virtualMemory, GuestThreadStackBaseAddress, stackSize, ProgramHeaderFlags.Read | ProgramHeaderFlags.Write, out var stackBase, out error))
+		ulong stackBase = 0;
+		ulong tlsBase = 0;
+		lock (_guestThreadGate)
 		{
-			return false;
+			var count = _reusableGuestThreadRegions.Count;
+			for (var i = 0; i < count; i++)
+			{
+				var region = _reusableGuestThreadRegions.Dequeue();
+				if (stackBase == 0 && ReferenceEquals(region.Memory, virtualMemory) && region.StackSize >= stackSize)
+				{
+					stackBase = region.StackBase;
+					stackSize = region.StackSize;
+					tlsBase = region.TlsBase;
+				}
+				else
+				{
+					_reusableGuestThreadRegions.Enqueue(region);
+				}
+			}
 		}
-		if (!TryMapGuestThreadTlsRegion(virtualMemory, out var tlsBase, out error))
+		if (stackBase == 0)
 		{
-			return false;
+			if (!TryMapGuestThreadRegion(virtualMemory, GuestThreadStackBaseAddress, stackSize, ProgramHeaderFlags.Read | ProgramHeaderFlags.Write, out stackBase, out error))
+			{
+				return false;
+			}
+			if (!TryMapGuestThreadTlsRegion(virtualMemory, out tlsBase, out error))
+			{
+				return false;
+			}
+		}
+		else
+		{
+			Span<byte> zero = stackalloc byte[4096];
+			zero.Clear();
+			var start = tlsBase - GuestThreadTlsPrefixSize;
+			for (ulong offset = 0; offset < GuestThreadTlsPrefixSize + GuestThreadTlsSize; offset += (ulong)zero.Length)
+			{
+				if (!virtualMemory.TryWrite(start + offset, zero[..(int)Math.Min((ulong)zero.Length, GuestThreadTlsPrefixSize + GuestThreadTlsSize - offset)]))
+				{
+					error = "failed to reset reused guest TLS";
+					return false;
+				}
+			}
 		}
 
 		var trackedMemory = new TrackedCpuMemory(virtualMemory);
@@ -5850,6 +5901,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				if (TryReleaseGuestThreadExecutorLocked(thread, out var pending))
 				{
 					pendingAfterExecutorRelease = pending;
+				}
+				if (thread.State == GuestThreadRunState.Exited &&
+					TryGetVirtualMemory(thread.Context, out var memory))
+				{
+					_reusableGuestThreadRegions.Enqueue((memory, thread.StackBase, thread.StackSize, thread.Context.FsBase));
+					thread.ExecutionRunner?.RequestStop();
 				}
 			}
 			if (pendingAfterExecutorRelease is { } pendingException &&
