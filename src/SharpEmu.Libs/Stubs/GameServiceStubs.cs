@@ -76,6 +76,31 @@ public static class GameServiceStubs
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSigninDialog")]
     public static int SigninDialogInitialize(CpuContext ctx) => Ok(ctx);
 
+    [SysAbiExport(Nid = "JlpJVoRWv7U", ExportName = "sceSigninDialogOpen",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSigninDialog")]
+    public static int SigninDialogOpen(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "Bw31liTFT3A", ExportName = "sceSigninDialogUpdateStatus",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSigninDialog")]
+    public static int SigninDialogUpdateStatus(CpuContext ctx) => ctx.SetReturn(3);
+
+    [SysAbiExport(Nid = "nqG7rqnYw1U", ExportName = "sceSigninDialogGetResult",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSigninDialog")]
+    public static int SigninDialogGetResult(CpuContext ctx)
+    {
+        var address = ctx[CpuRegister.Rdi];
+        if (address == 0)
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        Span<byte> result = stackalloc byte[16];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(result, 1); // User canceled.
+        return ctx.Memory.TryWrite(address, result)
+            ? Ok(ctx)
+            : ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
     [SysAbiExport(Nid = "LXlmS6PvJdU", ExportName = "sceSigninDialogTerminate",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSigninDialog")]
     public static int SigninDialogTerminate(CpuContext ctx) => Ok(ctx);
