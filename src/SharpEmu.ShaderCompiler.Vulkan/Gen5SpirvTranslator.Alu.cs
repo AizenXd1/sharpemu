@@ -2515,6 +2515,12 @@ public static partial class Gen5SpirvTranslator
                 var immediate = unchecked((uint)(short)(instruction.Words[0] & 0xFFFF));
                 if (instruction.Opcode.StartsWith("SCmpk", StringComparison.Ordinal))
                 {
+                    // The unsigned compares take SIMM16 zero-extended; only the signed ones sign-extend it.
+                    if (instruction.Opcode.EndsWith("U32", StringComparison.Ordinal))
+                    {
+                        immediate = instruction.Words[0] & 0xFFFF;
+                    }
+
                     return TryEmitScalarCompareK(instruction, destination, immediate, out error);
                 }
 
@@ -2534,6 +2540,13 @@ public static partial class Gen5SpirvTranslator
                 {
                     error = $"unsupported scalar immediate {instruction.Opcode}";
                     return false;
+                }
+
+                // RDNA2 ISA: S_ADDK_I32 writes SCC = signed overflow, exactly like
+                // S_ADD_I32. S_MOVK_I32 and S_MULK_I32 leave SCC alone.
+                if (instruction.Opcode == "SAddkI32")
+                {
+                    Store(_scc, SignedAddOverflow(current, UInt(immediate), value));
                 }
 
                 StoreS(destination, value);
