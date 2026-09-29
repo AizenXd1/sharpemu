@@ -218,6 +218,14 @@ public static class PadExports
     }
 
     [SysAbiExport(
+        Nid = "PZSoY8j0Pko",
+        ExportName = "scePadGetFeatureReport",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadGetFeatureReport(CpuContext ctx) =>
+        ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+
+    [SysAbiExport(
         Nid = "hGbf2QTBmqc",
         ExportName = "scePadGetExtControllerInformation",
         Target = Generation.Gen4 | Generation.Gen5,
