@@ -309,9 +309,21 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public void EmitGlobalBarrier()
         {
+            // Inside a rendering scope whose draws only wrote attachments, the barrier matters only
+            // to what runs after the scope: everything before the scope is ordered by the barrier
+            // BeginRendering records, and a draw that stores to memory ends a deferred scope first.
+            if (DeferGlobalBarriers && _renderingActive && !_renderingWritesMemory)
+            {
+                _globalBarrierAfterRendering = true;
+                return;
+            }
+
             EndRendering();
-            EndRendering();
-            var commandBuffer = BeginBatchedGuestCommands();
+            RecordGlobalBarrier(BeginBatchedGuestCommands());
+        }
+
+        private void RecordGlobalBarrier(CommandBuffer commandBuffer)
+        {
             var barrier = new MemoryBarrier2
             {
                 SType = StructureType.MemoryBarrier2,
@@ -334,7 +346,8 @@ internal static unsafe partial class VulkanVideoPresenter
         public void FillBuffer(ulong address, ulong size, uint value, bool isGds)
         {
             using var transferScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandMemoryTransfer);
-            EndRendering();
+            // Transfers the buffer cache completes in guest memory leave the rendering scope open;
+            // its GPU paths end the scope before they record.
             _ = BeginBatchedGuestCommands();
             _bufferCache.FillBuffer(address, size, value, isGds);
         }
@@ -342,7 +355,8 @@ internal static unsafe partial class VulkanVideoPresenter
         public void CopyBuffer(ulong destination, ulong source, ulong size, bool destinationIsGds, bool sourceIsGds)
         {
             using var transferScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandMemoryTransfer);
-            EndRendering();
+            // Transfers the buffer cache completes in guest memory leave the rendering scope open;
+            // its GPU paths end the scope before they record.
             _ = BeginBatchedGuestCommands();
             _bufferCache.CopyBuffer(destination, source, size, destinationIsGds, sourceIsGds);
         }
