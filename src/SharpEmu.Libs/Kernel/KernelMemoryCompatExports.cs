@@ -5177,7 +5177,7 @@ public static partial class KernelMemoryCompatExports
         return root;
     }
 
-    private static string ResolveTemp0Root()
+    internal static string ResolveTemp0Root()
     {
         const string temp0VariableName = "SHARPEMU_TEMP0_DIR";
         var configuredRoot = Environment.GetEnvironmentVariable(temp0VariableName);
@@ -5197,7 +5197,7 @@ public static partial class KernelMemoryCompatExports
 
         var invalidChars = Path.GetInvalidFileNameChars();
         appName = new string(appName.Select(ch => invalidChars.Contains(ch) ? '_' : ch).ToArray());
-        var root = Path.Combine(AppContext.BaseDirectory, "user", "temp", appName, "temp0");
+        var root = Path.Combine(Path.GetTempPath(), "SharpEmu", "temp0", appName, Path.GetRandomFileName());
         Environment.SetEnvironmentVariable(temp0VariableName, root);
         return root;
     }
