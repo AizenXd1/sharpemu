@@ -125,7 +125,6 @@ public static partial class KernelMemoryCompatExports
     // Mount components already found to exist without being reparse points. Titles resolve
     // every asset path at startup; re-reading each directory's attributes costs seconds.
     private static readonly ConcurrentDictionary<string, byte> _verifiedMountComponents = new(HostFsPath.Comparer);
-    private static readonly ConcurrentDictionary<string, byte> _verifiedMountDirectories = new(HostFsPath.Comparer);
     private static readonly ConcurrentDictionary<string, string> _fullMountRoots = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<string, byte> _aprScannedDirectories = new(HostFsPath.Comparer);
     private static long _nextFileDescriptor = 2;
@@ -5162,36 +5161,14 @@ public static partial class KernelMemoryCompatExports
                      Path.DirectorySeparatorChar,
                      StringSplitOptions.RemoveEmptyEntries))
         {
-            var parent = current;
             current = Path.Combine(current, segment);
+            // Each component is checked once with its own lstat. Listing the parent instead
+            // stats every entry of that directory (.NET fills attributes per entry), so a game
+            // image with large directories paid for files it never opens: Demon's Souls spent
+            // ~9 s of its load in those stats.
             if (_verifiedMountComponents.ContainsKey(current))
             {
                 continue;
-            }
-
-            // One listing returns every entry's attributes: verify the whole parent directory
-            // at once. Reparse points stay unverified and are rejected below.
-            if (_verifiedMountDirectories.TryAdd(parent, 0))
-            {
-                try
-                {
-                    foreach (var entry in new DirectoryInfo(parent).EnumerateFileSystemInfos())
-                    {
-                        if ((entry.Attributes & FileAttributes.ReparsePoint) == 0)
-                        {
-                            _verifiedMountComponents.TryAdd(entry.FullName, 0);
-                        }
-                    }
-                }
-                catch (Exception ex) when (
-                    ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
-                {
-                }
-
-                if (_verifiedMountComponents.ContainsKey(current))
-                {
-                    continue;
-                }
             }
 
             try
