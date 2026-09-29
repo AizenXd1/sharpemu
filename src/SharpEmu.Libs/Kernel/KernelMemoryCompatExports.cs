@@ -235,6 +235,8 @@ public static partial class KernelMemoryCompatExports
             _guestMounts[normalizedMountPoint] = normalizedHostRoot;
         }
 
+        InvalidateResolvedGuestPaths();
+
         lock (_statCacheGate)
         {
             _negativeStatCache.RemoveWhere(path =>
@@ -252,10 +254,18 @@ public static partial class KernelMemoryCompatExports
             return false;
         }
 
+        bool removed;
         lock (_guestMountGate)
         {
-            return _guestMounts.Remove(normalizedMountPoint);
+            removed = _guestMounts.Remove(normalizedMountPoint);
         }
+
+        if (removed)
+        {
+            InvalidateResolvedGuestPaths();
+        }
+
+        return removed;
     }
 
     internal static bool TryAllocateHleData(
@@ -4725,6 +4735,38 @@ public static partial class KernelMemoryCompatExports
         return FileMode.Open;
     }
 
+    // Resolution is pure text work plus a per-component reparse-point check, but a
+    // resource streamer resolves the same paths hundreds of thousands of times through
+    // sceKernelAprResolveFilepathsToIdsAndFileSizes. Memoize the mapping and drop it
+    // whenever the mount table changes, which is the only input that can change an
+    // already-computed answer.
+    // Each entry records the mount-root configuration it was computed under, so a
+    // host configuration change cannot serve a stale answer.
+    private static readonly ConcurrentDictionary<string, (string Root, string Path)> _resolvedGuestPaths =
+        new(StringComparer.Ordinal);
+    private const int ResolvedGuestPathCacheLimit = 1 << 20;
+    // ConcurrentDictionary.Count takes every bucket lock, which on a path resolved by
+    // a dozen guest threads at once costs far more than the resolution it guards.
+    private static int _resolvedGuestPathCount;
+
+    internal static void InvalidateResolvedGuestPaths()
+    {
+        _resolvedGuestPaths.Clear();
+        Interlocked.Exchange(ref _resolvedGuestPathCount, 0);
+    }
+
+    // Every mount root a built-in branch can use. Resolution depends on nothing else
+    // that changes at runtime (the mount table clears the cache itself), so a memoized
+    // answer stays valid exactly as long as this token does.
+    private static string RootConfigurationToken() =>
+        string.Concat(
+            Environment.GetEnvironmentVariable("SHARPEMU_APP0_DIR"), "|",
+            Environment.GetEnvironmentVariable("SHARPEMU_HOSTAPP_DIR"), "|",
+            Environment.GetEnvironmentVariable("SHARPEMU_DEVLOG_APP_DIR"), "|",
+            Environment.GetEnvironmentVariable("SHARPEMU_TEMP0_DIR"), "|",
+            Environment.GetEnvironmentVariable("SHARPEMU_DOWNLOAD0_DIR"), "|",
+            Environment.GetEnvironmentVariable("SHARPEMU_SAVEDATA_DIR"));
+
     public static string ResolveGuestPath(string guestPath)
     {
         if (string.IsNullOrWhiteSpace(guestPath))
@@ -4732,6 +4774,28 @@ public static partial class KernelMemoryCompatExports
             return guestPath;
         }
 
+        var roots = RootConfigurationToken();
+        if (_resolvedGuestPaths.TryGetValue(guestPath, out var memoized) &&
+            string.Equals(memoized.Root, roots, StringComparison.Ordinal))
+        {
+            return memoized.Path;
+        }
+
+        var resolved = ResolveGuestPathUncached(guestPath);
+        // Only a successful resolution is memoized: a denial is a containment
+        // decision about the host filesystem's current shape, so it stays live.
+        if (!string.IsNullOrEmpty(resolved) &&
+            Volatile.Read(ref _resolvedGuestPathCount) < ResolvedGuestPathCacheLimit &&
+            _resolvedGuestPaths.TryAdd(guestPath, (roots, resolved)))
+        {
+            Interlocked.Increment(ref _resolvedGuestPathCount);
+        }
+
+        return resolved;
+    }
+
+    private static string ResolveGuestPathUncached(string guestPath)
+    {
         if (TryResolveRegisteredGuestMount(guestPath, out var mountedPath, out var mountPrefixMatched))
         {
             return mountedPath;
