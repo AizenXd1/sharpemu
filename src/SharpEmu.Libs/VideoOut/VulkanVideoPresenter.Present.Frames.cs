@@ -145,11 +145,16 @@ internal static unsafe partial class VulkanVideoPresenter
         // for any dim scene. Encode linear->sRGB by blitting through an sRGB
         // intermediate (sRGB stores encode), then raw-copying the encoded
         // bytes into the same-class UNORM swapchain image.
-        private Image _presentEncodeImage;
-        private DeviceMemory _presentEncodeMemory;
+        // One intermediate per swapchain image: every frame discards the encode
+        // image's contents (Undefined -> TransferDst) before blitting into it,
+        // so a single shared image lets the next frame in flight overwrite the
+        // one the previous frame has not copied out yet, which presents as a
+        // fully zeroed (black) swapchain image.
+        private Image[] _presentEncodeImages = [];
+        private DeviceMemory[] _presentEncodeMemories = [];
         private Extent2D _presentEncodeExtent;
 
-        private bool TryGetPresentEncodeImage(out Image encodeImage)
+        private bool TryGetPresentEncodeImage(uint imageIndex, out Image encodeImage)
         {
             encodeImage = default;
             var encodeFormat = GetSrgbCounterpart(_swapchainFormat);
@@ -158,14 +163,29 @@ internal static unsafe partial class VulkanVideoPresenter
                 return false;
             }
 
-            if (_presentEncodeImage.Handle != 0 &&
+            if (_presentEncodeImages.Length != 0 &&
                 (_presentEncodeExtent.Width != _extent.Width ||
                  _presentEncodeExtent.Height != _extent.Height))
             {
                 DestroyPresentEncodeImage();
             }
 
-            if (_presentEncodeImage.Handle == 0)
+            if (_presentEncodeImages.Length <= imageIndex)
+            {
+                var grown = new Image[_swapchainImages.Length];
+                var grownMemory = new DeviceMemory[_swapchainImages.Length];
+                _presentEncodeImages.CopyTo(grown, 0);
+                _presentEncodeMemories.CopyTo(grownMemory, 0);
+                _presentEncodeImages = grown;
+                _presentEncodeMemories = grownMemory;
+            }
+
+            if (imageIndex >= _presentEncodeImages.Length)
+            {
+                return false;
+            }
+
+            if (_presentEncodeImages[imageIndex].Handle == 0)
             {
                 var imageInfo = new ImageCreateInfo
                 {
@@ -183,11 +203,11 @@ internal static unsafe partial class VulkanVideoPresenter
                     InitialLayout = ImageLayout.Undefined,
                 };
                 Check(
-                    _vk.CreateImage(_device, &imageInfo, null, out _presentEncodeImage),
+                    _vk.CreateImage(_device, &imageInfo, null, out _presentEncodeImages[imageIndex]),
                     "vkCreateImage(present encode)");
                 _vk.GetImageMemoryRequirements(
                     _device,
-                    _presentEncodeImage,
+                    _presentEncodeImages[imageIndex],
                     out var requirements);
                 var allocationInfo = new MemoryAllocateInfo
                 {
@@ -198,35 +218,45 @@ internal static unsafe partial class VulkanVideoPresenter
                         MemoryPropertyFlags.DeviceLocalBit),
                 };
                 Check(
-                    _deviceInfo.AllocateMemory(allocationInfo, out _presentEncodeMemory),
+                    _deviceInfo.AllocateMemory(allocationInfo, out _presentEncodeMemories[imageIndex]),
                     "vkAllocateMemory(present encode)");
                 Check(
-                    _vk.BindImageMemory(_device, _presentEncodeImage, _presentEncodeMemory, 0),
+                    _vk.BindImageMemory(
+                        _device,
+                        _presentEncodeImages[imageIndex],
+                        _presentEncodeMemories[imageIndex],
+                        0),
                     "vkBindImageMemory(present encode)");
                 _presentEncodeExtent = new Extent2D(_extent.Width, _extent.Height);
                 SetDebugName(
                     ObjectType.Image,
-                    _presentEncodeImage.Handle,
-                    "SharpEmu present sRGB-encode image");
+                    _presentEncodeImages[imageIndex].Handle,
+                    $"SharpEmu present sRGB-encode image {imageIndex}");
             }
 
-            encodeImage = _presentEncodeImage;
+            encodeImage = _presentEncodeImages[imageIndex];
             return true;
         }
 
         private void DestroyPresentEncodeImage()
         {
-            if (_presentEncodeImage.Handle != 0)
+            for (var index = 0; index < _presentEncodeImages.Length; index++)
             {
-                _vk.DestroyImage(_device, _presentEncodeImage, null);
-                _presentEncodeImage = default;
+                if (_presentEncodeImages[index].Handle != 0)
+                {
+                    _vk.DestroyImage(_device, _presentEncodeImages[index], null);
+                    _presentEncodeImages[index] = default;
+                }
+
+                if (_presentEncodeMemories[index].Handle != 0)
+                {
+                    _deviceInfo.FreeMemory(_presentEncodeMemories[index]);
+                    _presentEncodeMemories[index] = default;
+                }
             }
 
-            if (_presentEncodeMemory.Handle != 0)
-            {
-                _deviceInfo.FreeMemory(_presentEncodeMemory);
-                _presentEncodeMemory = default;
-            }
+            _presentEncodeImages = [];
+            _presentEncodeMemories = [];
 
             _presentEncodeExtent = default;
         }
@@ -291,7 +321,7 @@ internal static unsafe partial class VulkanVideoPresenter
             if (IsLinearFloatPresentSource(source.Format) &&
                 GetSrgbCounterpart(PresentationTargetFormat) != Format.Undefined)
             {
-                encodeForPresent = TryGetPresentEncodeImage(out encodeImage);
+                encodeForPresent = TryGetPresentEncodeImage(imageIndex, out encodeImage);
             }
 
             var encodeToTransferDst = new ImageMemoryBarrier2
@@ -303,7 +333,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 NewLayout = ImageLayout.TransferDstOptimal,
                 SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
                 DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
-                Image = _presentEncodeImage,
+                Image = encodeImage,
                 SubresourceRange = ColorSubresourceRange(),
             };
             var barriers = stackalloc ImageMemoryBarrier2[3];
@@ -709,8 +739,108 @@ internal static unsafe partial class VulkanVideoPresenter
             return destination;
         }
         // Captures the display surface through the store in queue order; presentation reads the copy.
+        // A flip snapshot is created and retired for every flip; on macOS that is a
+        // vkCreateImage plus a vkAllocateMemory (and a Metal texture) about twenty
+        // times a second for the same 1920x1080 target. Keep the retired ones and
+        // hand them back: a snapshot is fully overwritten by the copy that follows
+        // (its barrier takes it from Undefined), so its old contents and layout do
+        // not matter.
+        // The command-stream thread takes snapshots and the render thread retires
+        // them, so the pool is guarded.
+        private readonly Dictionary<(Format Format, uint Width, uint Height), Stack<GuestImageResource>>
+            _flipSnapshotPool = new();
+        private readonly object _flipSnapshotPoolGate = new();
+        private int _pooledFlipSnapshots;
+        // SHARPEMU_FLIP_SNAPSHOT_POOL=0 turns the pool off; it is on otherwise.
+        private bool _flipSnapshotPoolOpen =
+            !string.Equals(
+                Environment.GetEnvironmentVariable("SHARPEMU_FLIP_SNAPSHOT_POOL"),
+                "0",
+                StringComparison.Ordinal);
+        private const int MaxPooledFlipSnapshots = 8;
+
+        private bool TryTakePooledFlipSnapshot(
+            Format format,
+            uint width,
+            uint height,
+            ulong address,
+            long version,
+            out GuestImageResource snapshot)
+        {
+            lock (_flipSnapshotPoolGate)
+            {
+                snapshot = null!;
+                if (!_flipSnapshotPoolOpen ||
+                    !_flipSnapshotPool.TryGetValue((format, width, height), out var available) ||
+                    available.Count == 0)
+                {
+                    return false;
+                }
+
+                snapshot = available.Pop();
+                _pooledFlipSnapshots--;
+            }
+
+            snapshot.Address = address;
+            snapshot.FlipVersion = version;
+            return true;
+        }
+
+        private bool TryPoolFlipSnapshot(GuestImageResource resource)
+        {
+            lock (_flipSnapshotPoolGate)
+            {
+                if (!_flipSnapshotPoolOpen || resource.Image.Handle == 0 || resource.Memory.Handle == 0 ||
+                    _pooledFlipSnapshots >= MaxPooledFlipSnapshots)
+                {
+                    return false;
+                }
+
+                var key = (resource.Format, resource.Width, resource.Height);
+                if (!_flipSnapshotPool.TryGetValue(key, out var available))
+                {
+                    available = new Stack<GuestImageResource>();
+                    _flipSnapshotPool[key] = available;
+                }
+
+                resource.Address = 0;
+                resource.FlipVersion = 0;
+                available.Push(resource);
+                _pooledFlipSnapshots++;
+                return true;
+            }
+        }
+
+        // Closes the pool and hands every kept snapshot back for a real destroy.
+        private void DrainFlipSnapshotPool()
+        {
+            List<GuestImageResource> kept = [];
+            lock (_flipSnapshotPoolGate)
+            {
+                _flipSnapshotPoolOpen = false;
+                foreach (var available in _flipSnapshotPool.Values)
+                {
+                    kept.AddRange(available);
+                }
+
+                _flipSnapshotPool.Clear();
+                _pooledFlipSnapshots = 0;
+            }
+
+            foreach (var resource in kept)
+            {
+                DestroyGuestImage(resource);
+            }
+        }
+
         private GuestImageResource CreateGuestFlipSnapshot(Format format, uint width, uint height, ulong address, long version)
         {
+            if (TryTakePooledFlipSnapshot(format, width, height, address, version, out var pooled))
+            {
+                SetDebugName(ObjectType.Image, pooled.Image.Handle, $"guest flip v{version} source 0x{address:X16}");
+                return pooled;
+            }
+
             var imageInfo = new ImageCreateInfo
             {
                 SType = StructureType.ImageCreateInfo,
