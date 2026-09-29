@@ -541,7 +541,9 @@ public static class AvPlayerExports
             {
                 Handle = handle,
                 IsGen5 = IsGen5Target(ctx.TargetGeneration),
-                AutoStart = TryReadByte(ctx, initDataAddress + autoStartOffset, out var autoStart) && autoStart != 0,
+                AutoStart = StartsAutomatically(
+                    TryReadByte(ctx, initDataAddress + autoStartOffset, out var autoStart) && autoStart != 0,
+                    TryReadUInt64(ctx, initDataAddress + 88, out var eventCallbackForStart) ? eventCallbackForStart : 0),
                 GuestBuffers = new ulong[ReadOutputVideoFrameBufferCount(
                     ctx,
                     initDataAddress,
@@ -615,7 +617,9 @@ public static class AvPlayerExports
             {
                 Handle = handle,
                 IsGen5 = IsGen5Target(ctx.TargetGeneration),
-                AutoStart = TryReadByte(ctx, initDataAddress + autoStartOffset, out var autoStart) && autoStart != 0,
+                AutoStart = StartsAutomatically(
+                    TryReadByte(ctx, initDataAddress + autoStartOffset, out var autoStart) && autoStart != 0,
+                    TryReadUInt64(ctx, initDataAddress + 96, out var eventCallbackForStart) ? eventCallbackForStart : 0),
                 GuestBuffers = new ulong[ReadOutputVideoFrameBufferCount(
                     ctx,
                     initDataAddress,
@@ -2619,6 +2623,13 @@ public static class AvPlayerExports
 
     internal static bool IsGen5Target(Generation generation) =>
         (generation & Generation.Gen5) != 0;
+
+    // A player plays on its own once its source is ready when the title asks for autoStart or
+    // registers no event callback: without one nothing could observe the ready state and start
+    // it. Such a title never calls sceAvPlayerStart and waits for the player to go inactive at the
+    // end of the stream, so leaving it unstarted kept it active forever.
+    internal static bool StartsAutomatically(bool autoStartRequested, ulong eventCallback) =>
+        autoStartRequested || eventCallback == 0;
 
     internal static ulong GetAutoStartOffset(Generation generation, bool extended) =>
         IsGen5Target(generation)
