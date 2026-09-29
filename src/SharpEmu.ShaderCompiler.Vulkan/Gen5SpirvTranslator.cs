@@ -3583,6 +3583,13 @@ public static partial class Gen5SpirvTranslator
         private (uint DataFormat, uint NumberFormat) DecodeGfx10BufferFormat(
             uint unifiedFormat)
         {
+            // A specialized descriptor makes the format a translation-time constant.
+            if (_module.TryGetConstantValue(unifiedFormat, out var knownFormat) && knownFormat < 128)
+            {
+                Gfx10UnifiedFormat.TryDecode(knownFormat, out var knownDataFormat, out var knownNumberFormat);
+                return (UInt(knownDataFormat), UInt(knownNumberFormat));
+            }
+
             // The descriptor is loaded at execution time, so format decoding
             // must remain dynamic too. Generate one module-level lookup table
             // from the same authoritative decoder used by descriptor
@@ -7379,9 +7386,14 @@ public static partial class Gen5SpirvTranslator
             _module.AddLabel(mergeLabel);
         }
 
+        // Only instructions that address LDS memory need the array. ds_swizzle/ds_bpermute move data
+        // between lanes and GDS instructions use the global data share, so a graphics stage using
+        // just those must not get an 8 KiB zero-initialized per-invocation array: Metal pays for it
+        // in compile time (seconds for a large pixel shader) and in private memory per pixel.
         private bool UsesLds() =>
-            _request.Program.Instructions.Any(instruction =>
-                instruction.Control is Gen5DataShareControl) ||
+            _request.Program.Instructions.Any(static instruction =>
+                instruction.Control is Gen5DataShareControl { Gds: false } &&
+                instruction.Opcode is not ("DsSwizzleB32" or "DsBpermuteB32")) ||
             _request.Memory.Entries.Any(static memory =>
                 memory.AddressSpace is FlatAddressSpace.Shared or FlatAddressSpace.SharedOrPrivate);
 
