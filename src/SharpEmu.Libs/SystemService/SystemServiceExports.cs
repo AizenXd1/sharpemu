@@ -28,6 +28,13 @@ public static class SystemServiceExports
     }
 
     [SysAbiExport(
+        Nid = "x1UB9bwDSOw",
+        ExportName = "sceSystemServiceDisableMusicPlayer",
+        Target = Generation.Gen5,
+        LibraryName = "libSceSystemService")]
+    public static int SystemServiceDisableMusicPlayer(CpuContext ctx) => ctx.SetReturn(0);
+
+    [SysAbiExport(
         Nid = "3RQ5aQfnstU",
         ExportName = "sceSystemServiceGetNoticeScreenSkipFlag",
         Target = Generation.Gen5,
