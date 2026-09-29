@@ -437,6 +437,7 @@ public static class AvPlayerExports
         public uint AvSyncMode { get; set; } = AvSyncModeDefault;
         public bool IsGen5 { get; init; }
         public bool Started { get; set; }
+        public bool Stopped { get; set; }
         public bool Paused { get; set; }
         public bool Looping { get; set; }
         public bool EndOfStream { get; set; }
@@ -540,7 +541,9 @@ public static class AvPlayerExports
             {
                 Handle = handle,
                 IsGen5 = IsGen5Target(ctx.TargetGeneration),
-                AutoStart = TryReadByte(ctx, initDataAddress + autoStartOffset, out var autoStart) && autoStart != 0,
+                AutoStart = StartsAutomatically(
+                    TryReadByte(ctx, initDataAddress + autoStartOffset, out var autoStart) && autoStart != 0,
+                    TryReadUInt64(ctx, initDataAddress + 88, out var eventCallbackForStart) ? eventCallbackForStart : 0),
                 GuestBuffers = new ulong[ReadOutputVideoFrameBufferCount(
                     ctx,
                     initDataAddress,
@@ -614,7 +617,9 @@ public static class AvPlayerExports
             {
                 Handle = handle,
                 IsGen5 = IsGen5Target(ctx.TargetGeneration),
-                AutoStart = TryReadByte(ctx, initDataAddress + autoStartOffset, out var autoStart) && autoStart != 0,
+                AutoStart = StartsAutomatically(
+                    TryReadByte(ctx, initDataAddress + autoStartOffset, out var autoStart) && autoStart != 0,
+                    TryReadUInt64(ctx, initDataAddress + 96, out var eventCallbackForStart) ? eventCallbackForStart : 0),
                 GuestBuffers = new ulong[ReadOutputVideoFrameBufferCount(
                     ctx,
                     initDataAddress,
@@ -724,6 +729,7 @@ public static class AvPlayerExports
             player = foundPlayer;
 
             player.Started = true;
+            player.Stopped = false;
             player.Paused = false;
             player.EndOfStream = false;
             Trace($"start handle=0x{player.Handle:X16}");
@@ -767,6 +773,7 @@ public static class AvPlayerExports
 
             player.ResetPlayback();
             player.Started = false;
+            player.Stopped = true;
         }
 
         NotifyEvent(ctx, player, 1); // StateStop
@@ -1001,7 +1008,9 @@ public static class AvPlayerExports
         lock (StateGate)
         {
             var found = Players.TryGetValue(ctx[CpuRegister.Rdi], out var player);
-            var active = found && player!.Started && !player.EndOfStream;
+            // Active from the moment a source is ready until it stops, fails or reaches its end,
+            // whether or not playback has started (titles poll it before calling sceAvPlayerStart).
+            var active = found && player!.SourcePath is not null && !player.Stopped && !player.EndOfStream;
             TraceOnce(
                 "is_active",
                 $"is_active found={found} started={(found && player!.Started)} " +
@@ -1388,6 +1397,7 @@ public static class AvPlayerExports
             player.DurationMilliseconds = duration;
             player.HasAudio = hasAudio;
             player.Started = player.AutoStart;
+            player.Stopped = false;
             autoStart = player.AutoStart;
             Trace(
                 $"source guest='{guestPath}' host='{hostPath}' {width}x{height} " +
@@ -2613,6 +2623,13 @@ public static class AvPlayerExports
 
     internal static bool IsGen5Target(Generation generation) =>
         (generation & Generation.Gen5) != 0;
+
+    // A player plays on its own once its source is ready when the title asks for autoStart or
+    // registers no event callback: without one nothing could observe the ready state and start
+    // it. Such a title never calls sceAvPlayerStart and waits for the player to go inactive at the
+    // end of the stream, so leaving it unstarted kept it active forever.
+    internal static bool StartsAutomatically(bool autoStartRequested, ulong eventCallback) =>
+        autoStartRequested || eventCallback == 0;
 
     internal static ulong GetAutoStartOffset(Generation generation, bool extended) =>
         IsGen5Target(generation)
