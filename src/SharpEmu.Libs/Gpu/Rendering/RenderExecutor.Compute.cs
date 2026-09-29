@@ -128,7 +128,18 @@ public sealed partial class RenderExecutor
         _host.EndRendering();
         using (_host.BeginPreparation())
         {
-            var pipeline = _pipelines.CreateComputePipeline(input, computeProgram.Program);
+            // The host may compile this program off the command-stream thread and report that
+            // the pipeline is not ready yet. The dispatch waits for it rather than being
+            // dropped: a guest that does not replay a one-shot dispatch deadlocks, because
+            // the dispatch can feed a label a later packet waits on. Asking again keeps the
+            // wait outside the pipeline cache's lock, so other queues can create their own
+            // pipelines while this program compiles.
+            PipelineHandle pipeline;
+            while (!_pipelines.TryCreateComputePipeline(input, computeProgram.Program, out pipeline))
+            {
+                Thread.Sleep(1);
+            }
+
             var bindings = _host.PrepareBindings(input.Stage);
             if (program.UsesDeviceAddresses)
             {
