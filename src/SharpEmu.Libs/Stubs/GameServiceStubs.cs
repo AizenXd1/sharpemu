@@ -105,6 +105,15 @@ public static class GameServiceStubs
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSigninDialog")]
     public static int SigninDialogTerminate(CpuContext ctx) => Ok(ctx);
 
+    [SysAbiExport(Nid = "UOjiprYwVNw", ExportName = "sceTextToSpeech2Initialize",
+        Target = Generation.Gen5, LibraryName = "libSceTextToSpeech2")]
+    public static int TextToSpeech2Initialize(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "X0HZNbSiqyg", ExportName = "sceTextToSpeech2Open",
+        Target = Generation.Gen5, LibraryName = "libSceTextToSpeech2")]
+    public static int TextToSpeech2Open(CpuContext ctx) =>
+        ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_IMPLEMENTED);
+
     [SysAbiExport(Nid = "kvYEw2lBndk", ExportName = "sceGameLiveStreamingInitialize",
         Target = Generation.Gen5, LibraryName = "libSceGameLiveStreaming")]
     public static int GameLiveStreamingInitialize(CpuContext ctx) => Ok(ctx);
