@@ -2505,7 +2505,20 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 	}
 
+	// Patches unprotect and re-protect whole pages: two threads patching code that shares a page
+	// (runtime module loads, lazy TLS site patches on guest threads) would restore the other's page
+	// to read-execute while it is still writing, so every patch runs under one gate.
+	private static readonly object ImportStubPatchGate = new();
+
 	private unsafe bool PatchImportStub(nint address, nint trampoline)
+	{
+		lock (ImportStubPatchGate)
+		{
+			return PatchImportStubLocked(address, trampoline);
+		}
+	}
+
+	private unsafe bool PatchImportStubLocked(nint address, nint trampoline)
 	{
 		uint flNewProtect = default(uint);
 		if (!VirtualProtect((void*)address, 16u, 64u, &flNewProtect))
@@ -3695,6 +3708,16 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	}
 
 	private static unsafe bool WriteTlsInstruction(nint address, ReadOnlySpan<byte> replacement)
+	{
+		// Guest threads patch their TLS sites as they first reach them; two sites on one page would
+		// otherwise race the unprotect/restore pair exactly like the import stubs.
+		lock (ImportStubPatchGate)
+		{
+			return WriteTlsInstructionLocked(address, replacement);
+		}
+	}
+
+	private static unsafe bool WriteTlsInstructionLocked(nint address, ReadOnlySpan<byte> replacement)
 	{
 		if (replacement.Length is < 1 or > 15 ||
 			VirtualQuery((void*)address, out var information, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 ||
