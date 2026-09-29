@@ -1309,7 +1309,7 @@ public static partial class Gen5SpirvTranslator
             StoreS(register.Value, value);
         }
 
-        private enum SharedMemoryPhase { None, Read, Write }
+        private enum SharedMemoryPhase { None, Read, Write, Unknown }
 
         private bool TryEmitBlock(
             IReadOnlyList<ShaderBlock> blocks,
@@ -1318,10 +1318,13 @@ public static partial class Gen5SpirvTranslator
         {
             error = string.Empty;
             var block = blocks[blockIndex];
-            // One guest wave can span two host subgroups. Keep its shared-memory phases ordered.
-            // Restrict added barriers to a single block, where all invocations follow the same path.
-            var synchronizeSharedMemory = _emulateWave64 && blocks.Count == 1;
-            var sharedMemoryPhase = SharedMemoryPhase.None;
+            // One guest wave can span two host subgroups; the guest orders its lanes' LDS accesses
+            // by executing in lockstep, so a change between reading and writing needs a barrier
+            // between the halves. Every guest branch condition is wave-uniform (EXEC and VCC tests
+            // go through the wave mask, SCC is scalar), so every block is entered by the whole wave
+            // and may hold a barrier. Another block may have left either phase behind.
+            var synchronizeSharedMemory = _emulateWave64;
+            var sharedMemoryPhase = blocks.Count == 1 ? SharedMemoryPhase.None : SharedMemoryPhase.Unknown;
             for (var index = block.StartIndex; index < block.EndIndex; index++)
             {
                 var instruction = _request.Program.Instructions[index];
@@ -6917,12 +6920,33 @@ public static partial class Gen5SpirvTranslator
             Store(ScalarPointer(register), value);
             if (register is 106 or 107)
             {
-                Store(_vcc, IsWaveMaskActive(LoadS64(106)));
+                if (_waveLaneCount != 32 || register == 106)
+                {
+                    Store(_vcc, IsLaneSetInMaskRegisters(106));
+                }
             }
             else if (register is 126 or 127)
             {
-                Store(_exec, IsWaveMaskActive(LoadS64(126)));
+                if (_waveLaneCount != 32 || register == 126)
+                {
+                    Store(_exec, IsLaneSetInMaskRegisters(126));
+                }
             }
+        }
+
+        // In wave32 a lane mask is its low register alone (VCC_HI and EXEC_HI are ordinary SGPRs),
+        // so the lane's bit is tested on one dword instead of a composed 64-bit mask.
+        private uint IsLaneSetInMaskRegisters(uint lowRegister)
+        {
+            if (_waveLaneCount != 32)
+            {
+                return IsWaveMaskActive(LoadS64(lowRegister));
+            }
+
+            var laneBit = _subgroupInvocationIdInput == 0
+                ? UInt(1)
+                : ShiftLeftLogical(UInt(1), GuestWaveLane());
+            return IsNotZero(BitwiseAnd(LoadS(lowRegister), laneBit));
         }
 
         private void StoreV(uint register, uint value, bool guardWithExec = true)
