@@ -878,6 +878,13 @@ public static partial class VideoOutExports
     public static int VideoOutVrrPegToFixedRate(CpuContext ctx) => ctx.SetReturn(0);
 
     [SysAbiExport(
+        Nid = "T4ucGB8CsnM",
+        ExportName = "sceVideoOutVrrUnpegFromFixedRate",
+        Target = Generation.Gen5,
+        LibraryName = "libSceVideoOut")]
+    public static int VideoOutVrrUnpegFromFixedRate(CpuContext ctx) => ctx.SetReturn(0);
+
+    [SysAbiExport(
         Nid = "Xru92wHJRmg",
         ExportName = "sceVideoOutAddVblankEvent",
         Target = Generation.Gen4 | Generation.Gen5,
