@@ -160,6 +160,7 @@ public static partial class Gen5SpirvTranslator
         private uint _storageBlockPointer;
         private uint _storageUintPointer;
         private uint _lds;
+        private uint _ldsDwordCount = LdsDwordCount;
         private uint _ldsElementPointer;
         private uint _lds64ElementPointer;
         private uint _ldsDwordMask;
@@ -684,6 +685,21 @@ public static partial class Gen5SpirvTranslator
             _interfaces.Add(_waveBroadcastScratch);
         }
 
+        // Threadgroup memory bounds how many workgroups a Metal core keeps resident: declaring the
+        // whole 32 KiB for a program that allocates a few hundred bytes leaves one workgroup per core.
+        // Size the array to the dispatch's LDS allocation plus the three wave64 bridge dwords at its
+        // end, as a power of two so the index mask still keeps accesses inside it.
+        private static uint ComputeLdsDwordCount(uint allocatedDwords)
+        {
+            if (allocatedDwords == 0)
+            {
+                return LdsDwordCount;
+            }
+
+            var needed = Math.Min(allocatedDwords + 3, LdsDwordCount);
+            return Math.Max(64u, System.Numerics.BitOperations.RoundUpToPowerOf2(needed));
+        }
+
         private void DeclareLds()
         {
             if (!UsesLds())
@@ -703,8 +719,9 @@ public static partial class Gen5SpirvTranslator
                 ? SpirvStorageClass.Workgroup
                 : SpirvStorageClass.Private;
             var dwordCount = _stage == Gen5SpirvStage.Compute
-                ? LdsDwordCount
+                ? ComputeLdsDwordCount(_request.LocalDataShareDwords)
                 : PrivateLdsDwordCount;
+            _ldsDwordCount = dwordCount;
             _ldsDwordMask = dwordCount - 1;
 
             var ldsArrayType = _module.TypeArray(_uintType, dwordCount);
@@ -7177,7 +7194,7 @@ public static partial class Gen5SpirvTranslator
                 SpirvOp.AccessChain,
                 _waveMaskScratchElementPointer,
                 _waveScratchInLds ? _lds : _waveMaskScratch,
-                _waveScratchInLds ? IAdd(UInt(LdsDwordCount - 3), index) : index);
+                _waveScratchInLds ? IAdd(UInt(_ldsDwordCount - 3), index) : index);
 
         private uint WaveBroadcastScratchPointer() =>
             _waveScratchInLds
@@ -7185,7 +7202,7 @@ public static partial class Gen5SpirvTranslator
                     SpirvOp.AccessChain,
                     _ldsElementPointer,
                     _lds,
-                    UInt(LdsDwordCount - 1))
+                    UInt(_ldsDwordCount - 1))
                 : _waveBroadcastScratch;
 
         private void EmitWave64Barrier()
