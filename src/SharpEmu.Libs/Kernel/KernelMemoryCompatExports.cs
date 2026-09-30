@@ -3158,8 +3158,14 @@ public static partial class KernelMemoryCompatExports
 
     private static int MapDirectMemoryCore(CpuContext ctx, ulong inOutAddressPointer, ulong length,
         int protection, ulong flags, ulong directMemoryStart, ulong alignment)
-        => RunMappingTransaction(() => MapDirectMemoryTransaction(ctx, inOutAddressPointer, length,
-            protection, flags, directMemoryStart, alignment));
+        => RunMappingTransaction(
+            () => MapDirectMemoryTransaction(ctx, inOutAddressPointer, length, protection, flags, directMemoryStart, alignment),
+            () => IsNewMappingOutsideGpuMemory(ctx, inOutAddressPointer, length, flags));
+
+    // A kernel-placed mapping lands in free space; a fixed one must target untouched space.
+    private static bool IsNewMappingOutsideGpuMemory(CpuContext ctx, ulong inOutAddressPointer, ulong length, ulong flags) =>
+        (flags & OrbisKernelMapFixed) == 0 ||
+        (ctx.TryReadUInt64(inOutAddressPointer, out var requested) && IsUntouchedByGpu(requested, length));
 
     private static int MapDirectMemoryTransaction(CpuContext ctx, ulong inOutAddressPointer, ulong length,
         int protection, ulong flags, ulong directMemoryStart, ulong alignment)
@@ -5835,7 +5841,26 @@ public static partial class KernelMemoryCompatExports
     // One transaction for the whole batch: every entry would otherwise hand the GPU worker
     // its own mapping change and wait for the GPU to drain before it could run.
     private static int KernelBatchMapCore(CpuContext ctx, int flags)
-        => RunMappingTransaction(() => KernelBatchMapTransaction(ctx, flags));
+        => RunMappingTransaction(() => KernelBatchMapTransaction(ctx, flags), () => BatchOnlyAddsOutsideGpuMemory(ctx, flags));
+
+    // Only map operations, each placing memory where the GPU has never looked.
+    private static bool BatchOnlyAddsOutsideGpuMemory(CpuContext ctx, int flags)
+    {
+        var entriesAddress = ctx[CpuRegister.Rdi];
+        var entryCount = unchecked((int)ctx[CpuRegister.Rsi]);
+        if (entryCount <= 0 || entryCount > 4096)
+            return false;
+        for (var index = 0; index < entryCount; index++)
+        {
+            var entryAddress = entriesAddress + (ulong)(index * OrbisKernelBatchMapEntrySize);
+            if (!TryReadBatchMapEntry(ctx, entryAddress, out var entry) ||
+                entry.Operation is not (OrbisKernelMapOpMapDirect or OrbisKernelMapOpMapFlexible) ||
+                !IsNewMappingOutsideGpuMemory(ctx, entryAddress + OrbisKernelBatchMapEntryStartOffset, entry.Length, unchecked((uint)flags)))
+                return false;
+        }
+
+        return true;
+    }
 
     private static int KernelBatchMapTransaction(CpuContext ctx, int flags)
     {
