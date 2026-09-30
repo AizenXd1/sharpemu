@@ -45,6 +45,31 @@ public sealed class GuestPageTracker
         });
     }
 
+    // Lock-free pre-check for hot readers: only the GPU queue thread sets GPU-dirty bits,
+    // so on that thread a clear answer is exact; a stale dirty answer merely sends the
+    // caller to HasGpuDirtyPages. Allocation- and lock-free.
+    public bool MayHaveGpuDirtyPages(ulong vaddr, ulong size)
+    {
+        ValidateRange(vaddr, size);
+        var remaining = size;
+        var index = vaddr / BlockBytes;
+        var offset = vaddr % BlockBytes;
+        while (remaining != 0)
+        {
+            var bytes = Math.Min(BlockBytes - offset, remaining);
+            if (Volatile.Read(ref _regions[index]) is { } region && region.IsModified(WriteOrigin.Gpu, offset, bytes))
+            {
+                return true;
+            }
+
+            remaining -= bytes;
+            offset = 0;
+            index++;
+        }
+
+        return false;
+    }
+
     public bool IsCpuWriteHotRange(ulong vaddr, ulong size)
     {
         RejectUploadCallbackReentry();
@@ -114,51 +139,55 @@ public sealed class GuestPageTracker
     }
 
     // Removes protection from a range; a GPU-dirty region flushes through onFlush without the lock.
-    public bool InvalidateRegion(ulong vaddr, ulong size, Action onFlush) =>
-        InvalidateRegion(vaddr, size, onFlush, static flush =>
+    public bool InvalidateRegion(ulong vaddr, ulong size, Action onFlush)
+    {
+        var tracked = InvalidateRegion(vaddr, size, out var needsGpuFlush);
+        if (needsGpuFlush)
         {
-            flush();
-            return true;
-        }, out _);
+            onFlush();
+        }
 
-    // Allocation-free form for the CPU-write path, which runs on every tracked guest write: the flush
-    // takes its state as an argument, and flushesSucceeded is false when any flush returned false.
-    public bool InvalidateRegion<TState>(ulong vaddr, ulong size, TState state, Func<TState, bool> onFlush,
-        out bool flushesSucceeded)
+        return tracked;
+    }
+
+    // Marks the CPU write in every region whose bytes the GPU has not modified and
+    // reports whether any region still holds GPU data the caller must download first
+    // (one download of the whole range covers them all). Allocation-free: guest
+    // command writes land here once per dword.
+    public bool InvalidateRegion(ulong vaddr, ulong size, out bool needsGpuFlush)
     {
         RejectUploadCallbackReentry();
-        var visit = new InvalidateVisit<TState>(state, onFlush);
-        VisitRegions(vaddr, size, create: false, ref visit, static (TrackedRegion region, ulong offset, ulong bytes,
-            ref InvalidateVisit<TState> visit) =>
+        ValidateRange(vaddr, size);
+        var tracked = false;
+        needsGpuFlush = false;
+        var remaining = size;
+        var index = vaddr / BlockBytes;
+        var offset = vaddr % BlockBytes;
+        while (remaining != 0)
         {
-            visit.Tracked = true;
-            bool shouldFlush;
-            using (region.Lock.Hold())
+            var bytes = Math.Min(BlockBytes - offset, remaining);
+            if (Volatile.Read(ref _regions[index]) is { } region)
             {
-                shouldFlush = region.IsModified(WriteOrigin.Gpu, offset, bytes);
-                if (!shouldFlush)
+                tracked = true;
+                using (region.Lock.Hold())
                 {
-                    region.MarkCpuWrite(region.BaseAddress + offset, bytes);
+                    if (region.IsModified(WriteOrigin.Gpu, offset, bytes))
+                    {
+                        needsGpuFlush = true;
+                    }
+                    else
+                    {
+                        region.MarkCpuWrite(region.BaseAddress + offset, bytes);
+                    }
                 }
             }
 
-            if (shouldFlush)
-            {
-                visit.FlushesSucceeded &= visit.OnFlush(visit.State);
-            }
+            remaining -= bytes;
+            offset = 0;
+            index++;
+        }
 
-            return false;
-        });
-        flushesSucceeded = visit.FlushesSucceeded;
-        return visit.Tracked;
-    }
-
-    private struct InvalidateVisit<TState>(TState state, Func<TState, bool> onFlush)
-    {
-        public readonly TState State = state;
-        public readonly Func<TState, bool> OnFlush = onFlush;
-        public bool Tracked;
-        public bool FlushesSucceeded = true;
+        return tracked;
     }
 
     public void ForEachDownloadRange(ulong vaddr, ulong size, bool clear, Action<ulong, ulong>? preflight, Action<ulong, ulong> visit)
@@ -369,6 +398,49 @@ public sealed class GuestPageTracker
 
     // True when every block of the range is tracked and has no CPU-dirty page. A missing
     // region is not known clean: the precise path creates it, fully dirty.
+    // Visits the maximal runs of the range whose 4 MiB blocks may hold CPU-dirty pages: a block
+    // with no region yet starts all dirty, and a region's summary bit is set while any of its
+    // pages is dirty. Known-clean blocks are skipped without a lock, the same test
+    // HasCpuDirtyPages starts with, so a caller that only uploads dirty pages loses nothing.
+    public void ForEachPossiblyCpuDirtyRange(ulong vaddr, ulong size, Action<ulong, ulong> visit)
+    {
+        if (size == 0)
+        {
+            return;
+        }
+
+        if (!new GuestSpan(vaddr, size).IsValid)
+        {
+            // Outside the tracked space nothing is known clean; the caller decides as before.
+            visit(vaddr, size);
+            return;
+        }
+
+        var end = vaddr + size;
+        var last = (end - 1) / BlockBytes;
+        var runStart = 0UL;
+        var inRun = false;
+        for (var index = vaddr / BlockBytes; index <= last; index++)
+        {
+            var possiblyDirty = Volatile.Read(ref _regions[index]) == null || _cpuDirtySummary.IsDirty(index);
+            if (possiblyDirty && !inRun)
+            {
+                runStart = Math.Max(vaddr, index * BlockBytes);
+                inRun = true;
+            }
+            else if (!possiblyDirty && inRun)
+            {
+                visit(runStart, index * BlockBytes - runStart);
+                inRun = false;
+            }
+        }
+
+        if (inRun)
+        {
+            visit(runStart, end - runStart);
+        }
+    }
+
     private bool IsKnownCpuClean(ulong vaddr, ulong size)
     {
         ValidateRange(vaddr, size);
@@ -385,13 +457,7 @@ public sealed class GuestPageTracker
     }
 
     // Visits (region, offset, bytes) per 4 MiB chunk; a true result stops the walk early.
-    private delegate bool RegionVisitor<TState>(TrackedRegion region, ulong offset, ulong bytes, ref TState state);
-
-    private bool VisitRegions(ulong vaddr, ulong size, bool create, Func<TrackedRegion, ulong, ulong, bool> visit) =>
-        VisitRegions(vaddr, size, create, ref visit, static (TrackedRegion region, ulong offset, ulong bytes,
-            ref Func<TrackedRegion, ulong, ulong, bool> visit) => visit(region, offset, bytes));
-
-    private bool VisitRegions<TState>(ulong vaddr, ulong size, bool create, ref TState state, RegionVisitor<TState> visit)
+    private bool VisitRegions(ulong vaddr, ulong size, bool create, Func<TrackedRegion, ulong, ulong, bool> visit)
     {
         ValidateRange(vaddr, size);
         var remaining = size;
@@ -406,7 +472,7 @@ public sealed class GuestPageTracker
                 region = GetOrCreateRegion(index);
             }
 
-            if (region != null && visit(region, offset, bytes, ref state))
+            if (region != null && visit(region, offset, bytes))
             {
                 return true;
             }

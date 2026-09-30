@@ -1,7 +1,6 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using System.Buffers;
 using System.Buffers.Binary;
 using System.IO.Hashing;
 using SharpEmu.HLE;
@@ -49,9 +48,6 @@ public static class ShaderIdentity
     }
 
     // The declared hash when it is not zero, else the content hash of every code range.
-    [ThreadStatic]
-    private static XxHash3? _hash;
-
     public static ulong Compute(ICpuMemory memory, ulong codeAddress, ReadOnlySpan<(ulong Address, uint SizeBytes)> ranges, string label)
     {
         if (!TryReadDeclaredHash(memory, codeAddress, out var declaredHash))
@@ -64,28 +60,33 @@ public static class ShaderIdentity
             return declaredHash;
         }
 
-        // Runs per draw for shaders without a declared hash: the hasher and code buffer are reused.
-        var hash = _hash ??= new XxHash3();
+        // Shaders without a declared hash are rehashed on every draw, so the hasher and
+        // the code buffer are reused per thread instead of allocated per call.
+        var hash = _hasher ??= new XxHash3();
         hash.Reset();
         foreach (var (address, sizeBytes) in ranges)
         {
-            var code = ArrayPool<byte>.Shared.Rent((int)sizeBytes);
-            try
+            var buffer = _codeBuffer;
+            if (buffer is null || buffer.Length < sizeBytes)
             {
-                var span = code.AsSpan(0, (int)sizeBytes);
-                if (!memory.TryRead(address, span))
-                {
-                    throw Scheduling.SubmissionScheduler.Fatal($"The shader code is unreadable: label={label} shader=0x{address:X16} size=0x{sizeBytes:X8}.");
-                }
+                buffer = _codeBuffer = new byte[Math.Max(sizeBytes, 4096u)];
+            }
 
-                hash.Append(span);
-            }
-            finally
+            var code = buffer.AsSpan(0, (int)sizeBytes);
+            if (!memory.TryRead(address, code))
             {
-                ArrayPool<byte>.Shared.Return(code);
+                throw Scheduling.SubmissionScheduler.Fatal($"The shader code is unreadable: label={label} shader=0x{address:X16} size=0x{sizeBytes:X8}.");
             }
+
+            hash.Append(code);
         }
 
         return hash.GetCurrentHashAsUInt64();
     }
+
+    [ThreadStatic]
+    private static XxHash3? _hasher;
+
+    [ThreadStatic]
+    private static byte[]? _codeBuffer;
 }

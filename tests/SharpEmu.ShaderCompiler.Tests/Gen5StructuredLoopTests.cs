@@ -11,8 +11,8 @@ using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 namespace SharpEmu.ShaderCompiler.Tests;
 
 // A loop closed by a backward branch is emitted as a structured SPIR-V loop instead of the PC
-// dispatcher, with conditional exits from its body as breaks. Any other backward edge keeps the
-// dispatcher.
+// dispatcher, with conditional exits from its body as breaks. Any other backward edge falls back
+// to the guarded in-order blocks.
 public sealed class Gen5StructuredLoopTests
 {
     private const uint MoveFour = 0xBE800384;       // s_mov_b32 s0, 4
@@ -65,7 +65,7 @@ public sealed class Gen5StructuredLoopTests
     }
 
     [Fact]
-    public void SecondBackEdgeToTheHeaderKeepsTheDispatcher()
+    public void SecondBackEdgeToTheHeaderFallsBackToGuardedBlocks()
     {
         var spirv = Compile(
             MoveFour, SubtractOne, CompareTwo,
@@ -74,7 +74,10 @@ public sealed class Gen5StructuredLoopTests
             0xBF85FFFB, // s_cbranch_scc1 0x04
             EndProgram);
 
-        Assert.Contains(SpirvOp.Switch, Opcodes(spirv));
+        // Declined by the structurer; the guarded in-order blocks still emit the loop structured.
+        var opcodes = Opcodes(spirv);
+        Assert.Contains(SpirvOp.LoopMerge, opcodes);
+        Assert.DoesNotContain(SpirvOp.Switch, opcodes);
         ValidateWhenAvailable(spirv);
     }
 

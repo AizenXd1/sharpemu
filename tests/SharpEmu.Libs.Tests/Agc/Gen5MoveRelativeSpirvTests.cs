@@ -24,11 +24,14 @@ public sealed class Gen5MoveRelativeSpirvTests
     // [15:8]=op(0x03), [7:0]=ssrc0. m0 is SGPR 124, inline constant 2 is 130.
     private const uint SMovM0 = 0xBE800000u | (124u << 16) | (0x03u << 8) | 130u;
 
+    // s_mov_b32 m0, s3: a value the translator cannot bound.
+    private const uint SMovM0FromUserData = 0xBE800000u | (124u << 16) | (0x03u << 8) | 3u;
+
     [Fact]
     public void MovrelsB32_ReadsTheSourceRegisterThroughAComputedIndex()
     {
-        // s_mov_b32 m0, 2 ; v_movrels_b32 v5, v3   ->   v5 = vgpr[3 + m0]
-        var spirv = Compile([SMovM0, Vop1 | (5u << 17) | (0x43u << 9) | (256u + 3u)]);
+        // s_mov_b32 m0, s3 ; v_movrels_b32 v5, v3   ->   v5 = vgpr[3 + m0]
+        var spirv = Compile([SMovM0FromUserData, Vop1 | (5u << 17) | (0x43u << 9) | (256u + 3u)]);
 
         AssertResolvesRelativeRegistersWithSelects(spirv, "V_MOVRELS_B32");
     }
@@ -36,8 +39,8 @@ public sealed class Gen5MoveRelativeSpirvTests
     [Fact]
     public void MovreldB32_WritesTheDestinationRegisterThroughAComputedIndex()
     {
-        // s_mov_b32 m0, 2 ; v_movreld_b32 v5, v3   ->   vgpr[5 + m0] = v3
-        var spirv = Compile([SMovM0, Vop1 | (5u << 17) | (0x42u << 9) | (256u + 3u)]);
+        // s_mov_b32 m0, s3 ; v_movreld_b32 v5, v3   ->   vgpr[5 + m0] = v3
+        var spirv = Compile([SMovM0FromUserData, Vop1 | (5u << 17) | (0x42u << 9) | (256u + 3u)]);
 
         AssertResolvesRelativeRegistersWithSelects(spirv, "V_MOVRELD_B32");
     }
@@ -45,8 +48,8 @@ public sealed class Gen5MoveRelativeSpirvTests
     [Fact]
     public void MovrelsdB32_TranslatesWithoutDroppingShader()
     {
-        // s_mov_b32 m0, 2 ; v_movrelsd_b32 v5, v3  ->  vgpr[5 + m0] = vgpr[3 + m0]
-        var spirv = Compile([SMovM0, Vop1 | (5u << 17) | (0x44u << 9) | (256u + 3u)]);
+        // s_mov_b32 m0, s3 ; v_movrelsd_b32 v5, v3  ->  vgpr[5 + m0] = vgpr[3 + m0]
+        var spirv = Compile([SMovM0FromUserData, Vop1 | (5u << 17) | (0x44u << 9) | (256u + 3u)]);
 
         AssertResolvesRelativeRegistersWithSelects(spirv, "V_MOVRELSD_B32");
     }
@@ -59,6 +62,21 @@ public sealed class Gen5MoveRelativeSpirvTests
         var spirv = Compile([SMovM0, Vop1 | (5u << 17) | (0x48u << 9) | (256u + 3u)]);
 
         AssertResolvesRelativeRegistersWithSelects(spirv, "V_MOVRELSD_2_B32");
+    }
+
+    [Theory]
+    [InlineData(0x43u)]
+    [InlineData(0x42u)]
+    [InlineData(0x44u)]
+    public void RelativeMovesWithAKnownM0_UseConstantRegisterNumbers(uint opcode)
+    {
+        // s_mov_b32 m0, 2 lets the translator pick the register directly, so the VGPR
+        // array is never indexed at run time.
+        var spirv = Compile([SMovM0, Vop1 | (5u << 17) | (opcode << 9) | (256u + 3u)]);
+
+        Assert.False(
+            HasDynamicVectorRegisterAccess(spirv),
+            "a relative move with a known M0 must not index the VGPR array at run time");
     }
 
     [Fact]
@@ -113,6 +131,34 @@ public sealed class Gen5MoveRelativeSpirvTests
         }
 
         Assert.True(equalities > 1 && selects > 1, $"{opcode} must select the register its computed index names");
+    }
+
+    // True when some access chain takes a computed index, i.e. registers are indexed at run time.
+    private static bool HasDynamicVectorRegisterAccess(byte[] spirv)
+    {
+        var constants = new HashSet<uint>();
+        foreach (var (op, wordCount, offset) in EnumerateInstructions(spirv))
+        {
+            // OpConstant = 43, OpConstantNull = 46: (opcode, resultType, resultId, ...).
+            if (op is 43 or 46 && wordCount >= 3)
+            {
+                constants.Add(ReadWord(spirv, offset + 8));
+            }
+        }
+
+        foreach (var (op, wordCount, offset) in EnumerateInstructions(spirv))
+        {
+            // OpAccessChain = 65: (opcode, resultType, resultId, base, index...).
+            for (var index = 4; op == 65 && index < wordCount; index++)
+            {
+                if (!constants.Contains(ReadWord(spirv, offset + index * sizeof(uint))))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     private static IEnumerable<(ushort Op, int WordCount, int Offset)> EnumerateInstructions(

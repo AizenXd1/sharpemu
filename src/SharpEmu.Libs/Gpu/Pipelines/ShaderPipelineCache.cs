@@ -76,7 +76,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ShaderInterfaceRegisters shaderInterface,
         ContextRegisters context,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
-        bool pixelActive)
+        bool pixelActive,
+        bool depthBound)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
         var vertexSource = PrepareSource(
@@ -109,7 +110,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 throw SubmissionScheduler.Fatal($"The pixel program declares too many interpolators: shader=0x{pixel.Address:X16} count={inputCount}.");
             }
 
-            pixelOutputs = ResolveBoundTargets(context, out var outputModes, out var outputMappings);
+            pixelOutputs = ResolveBoundTargets(context, targetExportMapping, depthBound ? pixelProgram.PixelColorExportMasks : null,
+                out var outputModes, out var outputMappings);
             pixelInfo = PixelStageInputResolver.Resolve(_context, pixelSource.Registered, shaderInterface, outputModes, outputMappings, inputCount);
             // SPI_PS_INPUT_CNTL can map an input to any parameter export, beyond the input count;
             // the vertex program must declare every location the pixel program reads.
@@ -248,7 +250,11 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     }
 
     // The bound colour slots in order; each output mode names the kind the pixel program exports.
-    private Gen5PixelOutputBinding[] ResolveBoundTargets(ContextRegisters context, out byte[] outputModes, out ColorComponentMap[] outputMappings)
+    // With a depth target bound, a slot the draw never writes is dropped here and from the
+    // attachments alike (RenderExecutor.DropUnwrittenColorTargets): unwrittenExportMasks is the
+    // pixel program's export mask then, null otherwise.
+    private Gen5PixelOutputBinding[] ResolveBoundTargets(ContextRegisters context, ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        uint? unwrittenExportMasks, out byte[] outputModes, out ColorComponentMap[] outputMappings)
     {
         outputModes = new byte[PixelInputInfo.TargetCount];
         outputMappings = new ColorComponentMap[PixelInputInfo.TargetCount];
@@ -262,6 +268,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
 
             if (ColorTargetResolver.Resolve(context, slot, 0, ignoreTargetMask: false, out _) is null)
+            {
+                continue;
+            }
+
+            if (unwrittenExportMasks is { } exportMasks &&
+                RenderExecutor.IsUnwrittenColorTarget(context, slot, targetExportMapping[(int)slot], exportMasks))
             {
                 continue;
             }

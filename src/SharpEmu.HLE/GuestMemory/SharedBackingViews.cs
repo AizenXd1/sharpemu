@@ -19,13 +19,16 @@ public sealed unsafe class SharedBackingViews : IDisposable
     private readonly HostBackingObject? _backing;
     private readonly object _lock = new();
     private readonly SortedList<ulong, ViewRecord> _views = new();
-    // Readers search this copy of _views without the lock: every HLE call that reads or writes
-    // aliased guest memory comes through here, and one lock across all guest threads made them
-    // queue (Demon's Souls' job threads spent seconds contending on it for 8-byte mutex reads).
-    // Mutations drop it under the lock; the next reader rebuilds it. A reader racing a mutation
-    // uses the copy from before it, as if it ran first.
-    private ViewRecord[]? _snapshot;
     private bool _disposed;
+
+    // Guest command writes and their reads by the render thread reach TryWriteBacking and
+    // TryReadBacking millions of times per second, a few bytes at a time, while views
+    // change rarely. Single-view accesses search this immutable copy of _views without
+    // the lock; every change to _views republishes it under the lock.
+    private ViewRecord[] _snapshot = [];
+
+    // Single-view accesses in flight; Dispose waits for them before releasing the alias.
+    private int _activeAccesses;
 
     public SharedBackingViews(IHostViewMemory host, ulong size)
     {
@@ -55,10 +58,17 @@ public sealed unsafe class SharedBackingViews : IDisposable
 
     public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data)
     {
-        if (TryResolveSingleView(address, (ulong)data.Length, out var aliasAddress))
+        if (TryAccessSingleView(address, (ulong)data.Length, out var target))
         {
-            data.CopyTo(new Span<byte>((void*)aliasAddress, data.Length));
-            return true;
+            try
+            {
+                data.CopyTo(new Span<byte>((void*)target, data.Length));
+                return true;
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _activeAccesses);
+            }
         }
 
         lock (_lock)
@@ -89,12 +99,38 @@ public sealed unsafe class SharedBackingViews : IDisposable
         }
     }
 
+    // The lock-free single-view read only; false (with nothing read) for anything else.
+    public bool TryReadSingleView(ulong address, Span<byte> data)
+    {
+        if (!TryAccessSingleView(address, (ulong)data.Length, out var source))
+        {
+            return false;
+        }
+
+        try
+        {
+            new ReadOnlySpan<byte>((void*)source, data.Length).CopyTo(data);
+            return true;
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _activeAccesses);
+        }
+    }
+
     public bool TryReadBacking(ulong address, Span<byte> data)
     {
-        if (TryResolveSingleView(address, (ulong)data.Length, out var aliasAddress))
+        if (TryAccessSingleView(address, (ulong)data.Length, out var source))
         {
-            new ReadOnlySpan<byte>((void*)aliasAddress, data.Length).CopyTo(data);
-            return true;
+            try
+            {
+                new ReadOnlySpan<byte>((void*)source, data.Length).CopyTo(data);
+                return true;
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _activeAccesses);
+            }
         }
 
         lock (_lock)
@@ -212,7 +248,7 @@ public sealed unsafe class SharedBackingViews : IDisposable
             }
 
             _views[address] = new ViewRecord(address, size, offset, protection) { WasRestored = wasRestored };
-            Volatile.Write(ref _snapshot, null);
+            PublishSnapshot();
         }
 
         failure = HostViewFailure.None;
@@ -287,7 +323,7 @@ public sealed unsafe class SharedBackingViews : IDisposable
                 {
                     old = record;
                     _views.RemoveAt(index);
-                    Volatile.Write(ref _snapshot, null);
+                    PublishSnapshot();
                 }
             }
         }
@@ -366,6 +402,49 @@ public sealed unsafe class SharedBackingViews : IDisposable
         }
     }
 
+    // Contains over the published snapshot, without the lock: descriptor validation asks
+    // this for every bound buffer, and the lock is contended by guest threads. A true answer
+    // is as current as a locked one would be once the lock were released.
+    public bool ContainsWithoutLock(ulong address, ulong size)
+    {
+        if (size == 0 || ulong.MaxValue - address < size || Volatile.Read(ref _disposed))
+        {
+            return false;
+        }
+
+        var snapshot = Volatile.Read(ref _snapshot);
+        var end = address + size;
+        var current = address;
+        while (current < end)
+        {
+            var low = 0;
+            var high = snapshot.Length - 1;
+            var found = -1;
+            while (low <= high)
+            {
+                var middle = low + ((high - low) >> 1);
+                if (snapshot[middle].Address <= current)
+                {
+                    found = middle;
+                    low = middle + 1;
+                }
+                else
+                {
+                    high = middle - 1;
+                }
+            }
+
+            if (found < 0 || current >= snapshot[found].Address + snapshot[found].Size)
+            {
+                return false;
+            }
+
+            current = Math.Min(end, snapshot[found].Address + snapshot[found].Size);
+        }
+
+        return true;
+    }
+
     public bool Contains(ulong address, ulong size)
     {
         if (size == 0 || ulong.MaxValue - address < size)
@@ -405,7 +484,15 @@ public sealed unsafe class SharedBackingViews : IDisposable
             _disposed = true;
             views = new List<ViewRecord>(_views.Values);
             _views.Clear();
-            Volatile.Write(ref _snapshot, null);
+            PublishSnapshot();
+        }
+
+        // A lock-free access that found a view before the snapshot emptied still copies
+        // through the alias; let it finish before the alias is released.
+        var spin = new SpinWait();
+        while (Volatile.Read(ref _activeAccesses) != 0)
+        {
+            spin.SpinOnce();
         }
 
         foreach (var view in views)
@@ -492,60 +579,6 @@ public sealed unsafe class SharedBackingViews : IDisposable
         return false;
     }
 
-    // The alias address of a range that lies inside one view, found without the lock.
-    private bool TryResolveSingleView(ulong address, ulong size, out ulong aliasAddress)
-    {
-        aliasAddress = 0;
-        if (!IsAvailable || size == 0 || ulong.MaxValue - address < size)
-        {
-            return false;
-        }
-
-        var views = Volatile.Read(ref _snapshot);
-        if (views is null)
-        {
-            lock (_lock)
-            {
-                views = _snapshot ??= [.. _views.Values];
-            }
-        }
-
-        int low = 0, high = views.Length - 1, found = -1;
-        while (low <= high)
-        {
-            var middle = (low + high) >>> 1;
-            if (views[middle].Address <= address)
-            {
-                found = middle;
-                low = middle + 1;
-            }
-            else
-            {
-                high = middle - 1;
-            }
-        }
-
-        if (found < 0)
-        {
-            return false;
-        }
-
-        var record = views[found];
-        if (address + size > record.Address + record.Size)
-        {
-            return false;
-        }
-
-        var offset = record.Offset + address - record.Address;
-        if (!IsWithinBacking(offset, size))
-        {
-            return false;
-        }
-
-        aliasAddress = AliasBase + offset;
-        return true;
-    }
-
     private bool TryFindRecord(ulong address, ulong size, out ViewRecord record)
     {
         record = default;
@@ -570,6 +603,62 @@ public sealed unsafe class SharedBackingViews : IDisposable
         return true;
     }
 
+    // Must be called under _lock after every change to _views.
+    private void PublishSnapshot()
+    {
+        var snapshot = new ViewRecord[_views.Count];
+        _views.Values.CopyTo(snapshot, 0);
+        Volatile.Write(ref _snapshot, snapshot);
+    }
+
+    // Resolves an access that lies inside one view to its alias address and registers
+    // it as in flight; the caller must decrement _activeAccesses when done. Anything
+    // else (spanning views, unmapped, disposed) is left to the locked path.
+    private bool TryAccessSingleView(ulong address, ulong size, out ulong target)
+    {
+        target = 0;
+        if (size == 0 || ulong.MaxValue - address < size)
+        {
+            return false;
+        }
+
+        Interlocked.Increment(ref _activeAccesses);
+        var snapshot = Volatile.Read(ref _snapshot);
+        var low = 0;
+        var high = snapshot.Length - 1;
+        var found = -1;
+        while (low <= high)
+        {
+            var middle = low + ((high - low) >> 1);
+            if (snapshot[middle].Address <= address)
+            {
+                found = middle;
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        if (found >= 0 && !Volatile.Read(ref _disposed) && _backing != null)
+        {
+            var record = snapshot[found];
+            if (address + size <= record.Address + record.Size)
+            {
+                var offset = record.Offset + address - record.Address;
+                if (IsWithinBacking(offset, size))
+                {
+                    target = AliasBase + offset;
+                    return true;
+                }
+            }
+        }
+
+        Interlocked.Decrement(ref _activeAccesses);
+        return false;
+    }
+
     private bool IsWithinBacking(ulong offset, ulong size) =>
         size != 0 && offset < Size && size <= Size - offset;
 
@@ -578,7 +667,7 @@ public sealed unsafe class SharedBackingViews : IDisposable
         lock (_lock)
         {
             _views[record.Address] = record;
-            Volatile.Write(ref _snapshot, null);
+            PublishSnapshot();
         }
     }
 
