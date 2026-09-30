@@ -126,7 +126,6 @@ public static partial class KernelMemoryCompatExports
     // every asset path at startup; re-reading each directory's attributes costs seconds.
     private static readonly ConcurrentDictionary<string, byte> _verifiedMountComponents = new(HostFsPath.Comparer);
     private static readonly ConcurrentDictionary<string, string> _fullMountRoots = new(StringComparer.Ordinal);
-    private static readonly ConcurrentDictionary<string, byte> _aprScannedDirectories = new(HostFsPath.Comparer);
     private static long _nextFileDescriptor = 2;
     private static string _applicationTitleId = "UNKNOWN";
 
@@ -5173,9 +5172,24 @@ public static partial class KernelMemoryCompatExports
 
             try
             {
-                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                // One lstat answers both questions a resolved asset path asks: whether the
+                // component is a link, and (for the file itself) its size for APR resolution.
+                var component = new FileInfo(current);
+                var attributes = component.Attributes;
+                if ((int)attributes == -1)
+                {
+                    // Component does not exist yet (create path); nothing to follow.
+                    break;
+                }
+
+                if ((attributes & FileAttributes.ReparsePoint) != 0)
                 {
                     return true;
+                }
+
+                if ((attributes & FileAttributes.Directory) == 0)
+                {
+                    _aprFileSizeCache.TryAdd(current, component.Length < 0 ? 0UL : unchecked((ulong)component.Length));
                 }
 
                 _verifiedMountComponents.TryAdd(current, 0);
@@ -6900,27 +6914,6 @@ public static partial class KernelMemoryCompatExports
         if (_aprMissingImagePaths.ContainsKey(cachePath))
         {
             return false;
-        }
-
-        // One directory listing returns every file's size; titles resolve whole asset
-        // directories at startup, so this replaces one host query per file.
-        if (Path.GetDirectoryName(cachePath) is { } directory && _aprScannedDirectories.TryAdd(directory, 0))
-        {
-            try
-            {
-                foreach (var file in new DirectoryInfo(directory).EnumerateFiles())
-                {
-                    _aprFileSizeCache.TryAdd(file.FullName, file.Length < 0 ? 0UL : unchecked((ulong)file.Length));
-                }
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
-            {
-            }
-
-            if (_aprFileSizeCache.TryGetValue(cachePath, out size))
-            {
-                return true;
-            }
         }
 
         try
