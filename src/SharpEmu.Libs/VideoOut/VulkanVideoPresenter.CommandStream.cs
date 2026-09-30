@@ -305,7 +305,7 @@ internal static unsafe partial class VulkanVideoPresenter
             CollectCompletedGuestSubmissions(waitForOldest: false);
         }
 
-        public void RunGarbageCollector() => RunGuestCacheCollection();
+        public void RunGarbageCollector() => RunGuestCacheCollection(endsFrame: false);
 
         public void EmitGlobalBarrier()
         {
@@ -536,7 +536,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             FlushBatchedGuestCommands();
-            RunGuestCacheCollection();
+            RunGuestCacheCollection(endsFrame: true);
             EnsureGuestSubmissionCapacity();
             long version;
             lock (_gate)
