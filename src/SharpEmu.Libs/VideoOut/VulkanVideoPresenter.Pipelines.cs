@@ -56,6 +56,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private readonly Dictionary<ulong, ShaderModule> _shaderModules = new();
         private readonly Dictionary<ulong, int> _shaderModuleSpirvBytes = new();
+        private readonly Dictionary<ulong, string> _shaderModuleCacheIdentities = new();
         private long _pipelineCreationMilliseconds;
         private KhrPushDescriptor _pushDescriptorApi = null!;
         private uint _maxPushDescriptors;
@@ -171,6 +172,7 @@ internal static unsafe partial class VulkanVideoPresenter
             SetDebugName(ObjectType.ShaderModule, module.Handle, $"SharpEmu {stage} 0x{hash:X16}");
             _shaderModules.Add(programId, module);
             _shaderModuleSpirvBytes[module.Handle] = shader.Payload.Length;
+            _shaderModuleCacheIdentities[module.Handle] = VulkanPipelineCacheStorage.CompiledShaderIdentity(shader.Payload);
             return module.Handle;
         }
 
@@ -786,7 +788,9 @@ internal static unsafe partial class VulkanVideoPresenter
                         Layout = layout,
                     };
                     var graphicsStart = Stopwatch.GetTimestamp();
-                    Check(_vk.CreateGraphicsPipelines(_device, _pipelineCache, 1, &pipelineInfo, null, out var pipeline),
+                    var cache = GetGuestPipelineCache(GraphicsCacheKey(description.VertexStage.Hash,
+                        description.PixelStage?.Hash ?? 0, vertexModule.Handle, pixelModule.Handle));
+                    Check(_vk.CreateGraphicsPipelines(_device, cache, 1, &pipelineInfo, null, out var pipeline),
                         $"vkCreateGraphicsPipelines(rendering vs=0x{description.VertexStage.Hash:X16} ps=0x{description.PixelStage?.Hash ?? 0:X16})");
                     ReportPipelineCreation(
                         (long)Stopwatch.GetElapsedTime(graphicsStart).TotalMilliseconds,
@@ -849,7 +853,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     Layout = layout,
                 };
                 var computeStart = Stopwatch.GetTimestamp();
-                Check(_vk.CreateComputePipelines(_device, _pipelineCache, 1, &pipelineInfo, null, out pipeline), $"vkCreateComputePipelines(rendering) hash=0x{description.Stage.Hash:X16}");
+                var cache = GetGuestPipelineCache(ComputeCacheKey(description.Stage.Hash, computeModule.Handle));
+                Check(_vk.CreateComputePipelines(_device, cache, 1, &pipelineInfo, null, out pipeline), $"vkCreateComputePipelines(rendering) hash=0x{description.Stage.Hash:X16}");
                 ReportPipelineCreation(
                     (long)Stopwatch.GetElapsedTime(computeStart).TotalMilliseconds,
                     "compute",
@@ -878,8 +883,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
         // One compute pipeline whose vkCreateComputePipelines call runs on a worker
         // thread. Everything the command stream owns (descriptor and pipeline layout,
-        // the module handle) is prepared before the task starts, so the task touches
-        // nothing but the Vulkan pipeline creation itself.
+        // the module handle) is prepared before the task starts. The worker loads
+        // its optional driver-cache shard and creates the native pipeline.
         private sealed class PendingComputePipeline
         {
             public required DescriptorSetLayout SetLayout;
@@ -958,7 +963,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var device = _device;
-            var cache = _pipelineCache;
+            var cacheSource = GetGuestPipelineCacheSource(ComputeCacheKey(description.Stage.Hash, computeModule.Handle));
             var vk = _vk;
             var started = new PendingComputePipeline
             {
@@ -980,6 +985,9 @@ internal static unsafe partial class VulkanVideoPresenter
                     var compileStart = Stopwatch.GetTimestamp();
                     try
                     {
+                        // Importing a MoltenVK cache compiles its MSL libraries.
+                        // Keep that work inside the same bounded compiler slot.
+                        var cache = ResolveGuestPipelineCache(cacheSource);
                         return CompileComputePipeline(vk, device, cache, computeModule, layout);
                     }
                     finally
@@ -1034,6 +1042,25 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 SilkMarshal.Free((nint)entryPoint);
             }
+        }
+
+        private void DrainPendingComputePipelines()
+        {
+            foreach (var pending in _pendingComputePipelines.Values)
+            {
+                try
+                {
+                    var pipeline = pending.Compile.GetAwaiter().GetResult();
+                    if (pipeline.Handle != 0) _vk.DestroyPipeline(_device, pipeline, null);
+                }
+                catch (Exception exception)
+                {
+                    Console.Error.WriteLine($"[LOADER][WARN] Pending compute pipeline failed during shutdown: {exception.Message}");
+                }
+                _vk.DestroyPipelineLayout(_device, pending.Layout, null);
+                _vk.DestroyDescriptorSetLayout(_device, pending.SetLayout, null);
+            }
+            _pendingComputePipelines.Clear();
         }
 
         private void DestroyRenderPipelines()
