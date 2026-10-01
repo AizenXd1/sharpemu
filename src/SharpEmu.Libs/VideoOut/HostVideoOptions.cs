@@ -64,7 +64,7 @@ public sealed record HostVideoOptions
 
     public bool OverlayEnabled { get; init; } = true;
     public PerformanceOverlayCorner OverlayCorner { get; init; } = PerformanceOverlayCorner.TopRight;
-    public PerformanceOverlayMode OverlayMode { get; init; } = PerformanceOverlayMode.Full;
+    public PerformanceOverlayMode OverlayMode { get; init; } = PerformanceOverlayMode.TitleBar;
 
     public HostVideoOptions Normalize() => this with
     {
@@ -74,7 +74,7 @@ public sealed record HostVideoOptions
         RefreshRate = Math.Clamp(RefreshRate, 0, 1000),
         HdrMode = Enum.IsDefined(HdrMode) ? HdrMode : HostHdrMode.Auto,
         OverlayCorner = Enum.IsDefined(OverlayCorner) ? OverlayCorner : PerformanceOverlayCorner.TopRight,
-        OverlayMode = Enum.IsDefined(OverlayMode) ? OverlayMode : PerformanceOverlayMode.Full,
+        OverlayMode = Enum.IsDefined(OverlayMode) ? OverlayMode : PerformanceOverlayMode.TitleBar,
     };
 }
 
