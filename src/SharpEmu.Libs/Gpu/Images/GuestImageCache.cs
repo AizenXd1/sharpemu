@@ -379,12 +379,13 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             }
         }
 
-        TakeGpuOwnership(image);
         if (request.Description.HasStencil)
         {
-            AssociateStencilRange(imageIdentifier, request.Description.Stencil);
+            image.Description.Stencil = request.Description.Stencil;
+            RefreshStencilPlane(imageIdentifier, image, request.Description.Metadata.StencilCompressed);
         }
 
+        TakeGpuOwnership(image);
         return image.GetOrCreateView(request.View);
     }
 
@@ -451,6 +452,17 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         }
     }
 
+    private void RefreshStencilPlane(ResourceSlotIdentifier depthIdentifier, CachedImage depth, bool stencilCompressed)
+    {
+        var association = AssociateStencilRange(depthIdentifier, depth.Description.Stencil);
+        if (stencilCompressed || depth.Description.Samples != 1)
+        {
+            return;
+        }
+
+        RefreshFromGuest(association, RefreshRequest(_slots[association]));
+    }
+
     public void MarkGpuWritten(ResourceSlotIdentifier imageIdentifier)
     {
         using var held = _lock.Hold();
@@ -462,13 +474,24 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
 
         WatchImage(imageIdentifier);
         TakeGpuOwnership(image);
+        if (image.Description.HasStencil)
+        {
+            TakeStencilOwnership(imageIdentifier, image);
+        }
+    }
+
+    private void TakeStencilOwnership(ResourceSlotIdentifier depthIdentifier, CachedImage depth)
+    {
+        var association = AssociateStencilRange(depthIdentifier, depth.Description.Stencil);
+        WatchImage(association);
+        TakeGpuOwnership(_slots[association]);
     }
 
     private static void TakeGpuOwnership(CachedImage image)
     {
-        if (image.DepthOwner.IsValid || !image.Backing.Exists)
+        if (!image.DepthOwner.IsValid && !image.Backing.Exists)
         {
-            throw SubmissionScheduler.Fatal($"A stencil association cannot own image contents: address=0x{image.Description.Data.Address:X16}.");
+            throw SubmissionScheduler.Fatal($"GPU ownership needs a native image or a stencil association: address=0x{image.Description.Data.Address:X16}.");
         }
 
         image.ClearBufferModified();

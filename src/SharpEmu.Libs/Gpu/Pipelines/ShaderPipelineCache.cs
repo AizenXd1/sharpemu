@@ -493,7 +493,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             // host output would otherwise write an undefined value (e.g. depth-only passes that
             // leave a color target bound and export only to the null target).
             var exportTarget = PixelExportRouting.ExportForSlot(context.ShaderInterface, color.Slot);
-            var exported = pixelStage is null ||
+            var exported = pixelStage is not null &&
                 (exportTarget >= 0 && ((pixelStage.PixelColorExportMasks >> (exportTarget * 4)) & 0xFu) != 0);
             var colorMask = exported ? color.Resolution.ExportMapping.ApplyMask(context.RenderTargetMaskForSlot(color.Slot)) : 0;
             parameters.SetColorMask(index, colorMask);
