@@ -23,6 +23,7 @@ public sealed class ResourceMaterializationCache
     private Dictionary<ulong, Entry> _young = new();
     private Dictionary<ulong, Entry> _old = new();
     private byte[] _scratch = new byte[256];
+    private ReadRecorder? _spareRecorder;
 
     public ResourceMaterializationCache(int generationCapacity = 16384)
     {
@@ -82,28 +83,35 @@ public sealed class ResourceMaterializationCache
 
         Misses++;
         Interlocked.Increment(ref _totalMisses);
-        var recorder = new ReadRecorder();
-        var recording = new ResourceRuntimeInputs
+        var recorder = TakeRecorder();
+        try
         {
-            UserData = inputs.UserData,
-            ShaderBase = inputs.ShaderBase,
-            ReadMemory = recorder.Wrap(inputs.ReadMemory, clean: false),
-            ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
-            ComputeState = inputs.ComputeState,
-            TablePhase = recorder.SetTablePhase,
-        };
-        if (!ResourceMaterializer.Materialize(plan, recording, ref snapshot, ref specialization, out failure))
-            return false;
+            var recording = new ResourceRuntimeInputs
+            {
+                UserData = inputs.UserData,
+                ShaderBase = inputs.ShaderBase,
+                ReadMemory = recorder.Wrap(inputs.ReadMemory, clean: false),
+                ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
+                ComputeState = inputs.ComputeState,
+                TablePhase = recorder.TablePhase,
+            };
+            if (!ResourceMaterializer.Materialize(plan, recording, ref snapshot, ref specialization, out failure))
+                return false;
 
-        if (recorder.Failed)
-        {
-            Uncacheable++;
-            Interlocked.Increment(ref _totalUncacheable);
+            if (recorder.Failed)
+            {
+                Uncacheable++;
+                Interlocked.Increment(ref _totalUncacheable);
+                return true;
+            }
+
+            Store(key, recorder.Build(plan, inputs, snapshot, specialization));
             return true;
         }
-
-        Store(key, recorder.Build(plan, inputs, snapshot, specialization));
-        return true;
+        finally
+        {
+            ReturnRecorder(recorder);
+        }
     }
 
     // Most stale entries in Demon's Souls differ only in words the shader reads through scalar
@@ -139,57 +147,77 @@ public sealed class ResourceMaterializationCache
         if (!changed)
             return false;
 
-        var recorder = new ReadRecorder();
-        var recording = new ResourceRuntimeInputs
+        var recorder = TakeRecorder();
+        try
         {
-            UserData = inputs.UserData,
-            ShaderBase = inputs.ShaderBase,
-            ReadMemory = recorder.Wrap(inputs.ReadMemory, clean: false),
-            ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
-            ComputeState = inputs.ComputeState,
-        };
-        var cachedTable = cached.Snapshot.FlattenedResourceTable;
-        if (!ResourceMaterializer.TryEvaluateTable(plan, recording, out var table) || recorder.Failed || table.Length != cachedTable.Length)
-            return false;
-
-        foreach (var (address, word, _, _) in recorder.Reads)
-        {
-            if (!TryFindWord(cached, address, out var offset) ||
-                System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(current.AsSpan(offset, sizeof(uint))) != word)
-                return false;
-        }
-
-        // The written device-address slots come from reads validated unchanged above.
-        foreach (var slot in plan.WrittenRangeSlotByHandle.Values)
-            cachedTable.AsSpan((int)slot, ShaderResourcePlan.WrittenRangeDwordCount).CopyTo(table.AsSpan((int)slot));
-
-        var previous = cached.Snapshot;
-        refreshed = new Entry
-        {
-            Plan = cached.Plan,
-            UserData = cached.UserData,
-            ShaderBase = cached.ShaderBase,
-            ComputeState = cached.ComputeState,
-            RangeAddresses = cached.RangeAddresses,
-            RangeOffsets = cached.RangeOffsets,
-            RangeLengths = cached.RangeLengths,
-            RangeClean = cached.RangeClean,
-            WordTableOnly = cached.WordTableOnly,
-            TableRefreshable = true,
-            Bytes = current,
-            Snapshot = new ResourceSnapshot
+            var recording = new ResourceRuntimeInputs
             {
-                Buffers = previous.Buffers,
-                Images = previous.Images,
-                Samplers = previous.Samplers,
-                FlattenedResourceTable = table,
-                UserData = previous.UserData,
-                DeviceAddressRanges = previous.DeviceAddressRanges,
-            },
-            Specialization = cached.Specialization,
-        };
-        Store(key, refreshed);
-        return true;
+                UserData = inputs.UserData,
+                ShaderBase = inputs.ShaderBase,
+                ReadMemory = recorder.Wrap(inputs.ReadMemory, clean: false),
+                ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
+                ComputeState = inputs.ComputeState,
+            };
+            var cachedTable = cached.Snapshot.FlattenedResourceTable;
+            if (!ResourceMaterializer.TryEvaluateTable(plan, recording, out var table) || recorder.Failed || table.Length != cachedTable.Length)
+                return false;
+
+            foreach (var (address, word, _, _) in recorder.Reads)
+            {
+                if (!TryFindWord(cached, address, out var offset) ||
+                    System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(current.AsSpan(offset, sizeof(uint))) != word)
+                    return false;
+            }
+
+            // The written device-address slots come from reads validated unchanged above.
+            foreach (var slot in plan.WrittenRangeSlotByHandle.Values)
+                cachedTable.AsSpan((int)slot, ShaderResourcePlan.WrittenRangeDwordCount).CopyTo(table.AsSpan((int)slot));
+
+            var previous = cached.Snapshot;
+            refreshed = new Entry
+            {
+                Plan = cached.Plan,
+                UserData = cached.UserData,
+                ShaderBase = cached.ShaderBase,
+                ComputeState = cached.ComputeState,
+                RangeAddresses = cached.RangeAddresses,
+                RangeOffsets = cached.RangeOffsets,
+                RangeLengths = cached.RangeLengths,
+                RangeClean = cached.RangeClean,
+                WordTableOnly = cached.WordTableOnly,
+                TableRefreshable = true,
+                Bytes = current,
+                Snapshot = new ResourceSnapshot
+                {
+                    Buffers = previous.Buffers,
+                    Images = previous.Images,
+                    Samplers = previous.Samplers,
+                    FlattenedResourceTable = table,
+                    UserData = previous.UserData,
+                    DeviceAddressRanges = previous.DeviceAddressRanges,
+                },
+                Specialization = cached.Specialization,
+            };
+            Store(key, refreshed);
+            return true;
+        }
+        finally
+        {
+            ReturnRecorder(recorder);
+        }
+    }
+
+    private ReadRecorder TakeRecorder()
+    {
+        var recorder = _spareRecorder ?? new ReadRecorder();
+        _spareRecorder = null;
+        return recorder;
+    }
+
+    private void ReturnRecorder(ReadRecorder recorder)
+    {
+        recorder.Reset();
+        _spareRecorder = recorder;
     }
 
     // The byte offset of a recorded dword in the entry's bytes, found by its address.
@@ -311,68 +339,113 @@ public sealed class ResourceMaterializationCache
     {
         private readonly List<(ulong Address, uint Word, bool Clean, bool Table)> _reads = new();
         private bool _inTable;
+        private GuestWordReader? _reader;
+        private GuestWordReader? _cleanReader;
+        private readonly GuestWordReader _recordRead;
+        private readonly GuestWordReader _recordCleanRead;
+
+        public ReadRecorder()
+        {
+            _recordRead = (ulong address, out uint word) => Read(_reader!, address, out word, clean: false);
+            _recordCleanRead = (ulong address, out uint word) => Read(_cleanReader!, address, out word, clean: true);
+            TablePhase = inTable => _inTable = inTable;
+        }
+
+        public void Reset()
+        {
+            _reads.Clear();
+            // Retain ordinary descriptor walks without keeping unusually large
+            // tables alive for the lifetime of the renderer.
+            if (_reads.Capacity > 16384)
+                _reads.Capacity = 0;
+            _reader = null;
+            _cleanReader = null;
+            _inTable = false;
+            Failed = false;
+        }
 
         public bool Failed { get; private set; }
 
         public List<(ulong Address, uint Word, bool Clean, bool Table)> Reads => _reads;
 
-        public void SetTablePhase(bool inTable) => _inTable = inTable;
+        public Action<bool> TablePhase { get; }
 
         public GuestWordReader? Wrap(GuestWordReader? inner, bool clean)
         {
             if (inner is null)
                 return null;
-            return (ulong address, out uint word) =>
+            if (clean)
             {
-                if (!inner(address, out word))
-                {
-                    Failed = true;
-                    return false;
-                }
+                _cleanReader = inner;
+                return _recordCleanRead;
+            }
+            _reader = inner;
+            return _recordRead;
+        }
 
-                _reads.Add((address, word, clean, _inTable));
-                return true;
-            };
+        private bool Read(GuestWordReader inner, ulong address, out uint word, bool clean)
+        {
+            if (!inner(address, out word))
+            {
+                Failed = true;
+                return false;
+            }
+            _reads.Add((address, word, clean, _inTable));
+            return true;
         }
 
         public Entry Build(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, ResourceSnapshot snapshot,
             ResourceSpecialization specialization)
         {
             _reads.Sort((left, right) => left.Address.CompareTo(right.Address));
-            var addresses = new List<ulong>();
-            var offsets = new List<int>();
-            var lengths = new List<int>();
-            var clean = new List<bool>();
-            var bytes = new List<byte>(_reads.Count * sizeof(uint));
-            var tableOnly = new List<bool>(_reads.Count);
+            // Count unique words and contiguous ranges first, then fill the
+            // retained arrays directly. Temporary lists previously duplicated
+            // every recorded byte and range on each cache miss.
+            var rangeCount = 0;
+            var wordCount = 0;
             ulong end = 0;
             var previous = ulong.MaxValue;
+            foreach (var read in _reads)
+            {
+                if (read.Address == previous) continue;
+                if (wordCount == 0 || read.Address != end) rangeCount++;
+                wordCount++;
+                previous = read.Address;
+                end = read.Address + sizeof(uint);
+            }
+
+            var addresses = new ulong[rangeCount];
+            var offsets = new int[rangeCount];
+            var lengths = new int[rangeCount];
+            var clean = new bool[rangeCount];
+            var bytes = new byte[wordCount * sizeof(uint)];
+            var tableOnly = new bool[wordCount];
+            var rangeIndex = -1;
+            var wordIndex = -1;
+            end = 0;
+            previous = ulong.MaxValue;
             foreach (var (address, word, wordClean, table) in _reads)
             {
                 if (address == previous)
                 {
-                    clean[^1] |= wordClean;
-                    tableOnly[^1] &= table;
+                    clean[rangeIndex] |= wordClean;
+                    tableOnly[wordIndex] &= table;
                     continue;
                 }
 
-                tableOnly.Add(table);
-
-                previous = address;
-                if (addresses.Count == 0 || address != end)
+                wordIndex++;
+                if (rangeIndex < 0 || address != end)
                 {
-                    addresses.Add(address);
-                    offsets.Add(bytes.Count);
-                    lengths.Add(0);
-                    clean.Add(false);
+                    rangeIndex++;
+                    addresses[rangeIndex] = address;
+                    offsets[rangeIndex] = wordIndex * sizeof(uint);
                 }
-
-                lengths[^1] += sizeof(uint);
-                clean[^1] |= wordClean;
-                bytes.Add((byte)word);
-                bytes.Add((byte)(word >> 8));
-                bytes.Add((byte)(word >> 16));
-                bytes.Add((byte)(word >> 24));
+                lengths[rangeIndex] += sizeof(uint);
+                clean[rangeIndex] |= wordClean;
+                tableOnly[wordIndex] = table;
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(
+                    bytes.AsSpan(wordIndex * sizeof(uint)), word);
+                previous = address;
                 end = address + sizeof(uint);
             }
 
@@ -385,14 +458,14 @@ public sealed class ResourceMaterializationCache
                 UserData = userData,
                 ShaderBase = inputs.ShaderBase,
                 ComputeState = inputs.ComputeState,
-                RangeAddresses = [.. addresses],
-                RangeOffsets = [.. offsets],
-                RangeLengths = [.. lengths],
-                RangeClean = [.. clean],
-                WordTableOnly = [.. tableOnly],
+                RangeAddresses = addresses,
+                RangeOffsets = offsets,
+                RangeLengths = lengths,
+                RangeClean = clean,
+                WordTableOnly = tableOnly,
                 TableRefreshable = snapshot.FlattenedResourceTable.Length ==
                     plan.TableReads.Count + plan.WrittenRangeCount * ShaderResourcePlan.WrittenRangeDwordCount,
-                Bytes = [.. bytes],
+                Bytes = bytes,
                 Snapshot = snapshot,
                 Specialization = specialization,
             };
