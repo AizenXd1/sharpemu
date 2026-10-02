@@ -33,6 +33,19 @@ public sealed class ResourceMaterializationCache
     private static long _totalHits;
     private static long _totalMisses;
     private static long _totalUncacheable;
+    private const int MaxVariants = 4;
+    private static long _totalStale;
+    private static long _totalStaleUnreadable;
+    private static long _totalRefreshes;
+
+    [ThreadStatic]
+    private static bool _readingTable;
+
+    public static bool ReadingTable
+    {
+        get => _readingTable;
+        private set => _readingTable = value;
+    }
 
     public long Hits { get; private set; }
     public long Misses { get; private set; }
@@ -45,9 +58,12 @@ public sealed class ResourceMaterializationCache
         var hits = Interlocked.Exchange(ref _totalHits, 0);
         var misses = Interlocked.Exchange(ref _totalMisses, 0);
         var uncacheable = Interlocked.Exchange(ref _totalUncacheable, 0);
+        var stale = Interlocked.Exchange(ref _totalStale, 0);
+        var staleUnreadable = Interlocked.Exchange(ref _totalStaleUnreadable, 0);
+        var refreshes = Interlocked.Exchange(ref _totalRefreshes, 0);
         var total = hits + misses;
         return FormattableString.Invariant(
-            $"[PERF][RESOURCE_CACHE] hits={hits} misses={misses} uncacheable={uncacheable} hit_rate={(total == 0 ? 0 : hits * 100.0 / total):F1}%");
+            $"[PERF][RESOURCE_CACHE] hits={hits} misses={misses} stale={stale} stale_unreadable={staleUnreadable} refreshes={refreshes} uncacheable={uncacheable} hit_rate={(total == 0 ? 0 : hits * 100.0 / total):F1}%");
     }
 
     public bool Materialize(
@@ -59,26 +75,48 @@ public sealed class ResourceMaterializationCache
         out ResourceMaterializationFailure failure)
     {
         var key = KeyOf(plan, inputs);
-        if (TryFind(key, plan, inputs, out var cached))
+        var found = TryFind(key, plan, inputs, out var cached);
+        if (found)
         {
-            if (Validate(cached, residentReader))
+            var unreadable = false;
+            Entry? previous = null;
+            for (var variant = cached; variant is not null; previous = variant, variant = variant.Next)
             {
-                Hits++;
-                Interlocked.Increment(ref _totalHits);
-                snapshot = cached.Snapshot;
-                specialization = cached.Specialization;
-                failure = default;
-                return true;
+                if (!variant.Matches(plan, inputs))
+                    continue;
+                if (Validate(variant, residentReader, out var variantUnreadable))
+                {
+                    if (previous is not null)
+                    {
+                        previous.Next = variant.Next;
+                        variant.Next = cached;
+                        Store(key, variant);
+                    }
+
+                    Hits++;
+                    Interlocked.Increment(ref _totalHits);
+                    snapshot = variant.Snapshot;
+                    specialization = variant.Specialization;
+                    failure = default;
+                    return true;
+                }
+
+                unreadable |= variantUnreadable;
             }
 
             if (TryRefreshTable(key, cached, plan, inputs, residentReader, out var refreshed))
             {
                 TableRefreshes++;
+                Interlocked.Increment(ref _totalRefreshes);
                 snapshot = refreshed.Snapshot;
                 specialization = refreshed.Specialization;
                 failure = default;
                 return true;
             }
+
+            Interlocked.Increment(ref _totalStale);
+            if (unreadable)
+                Interlocked.Increment(ref _totalStaleUnreadable);
         }
 
         Misses++;
@@ -105,7 +143,22 @@ public sealed class ResourceMaterializationCache
                 return true;
             }
 
-            Store(key, recorder.Build(plan, inputs, snapshot, specialization));
+            var built = recorder.Build(plan, inputs, snapshot, specialization);
+            if (found)
+            {
+                built.Next = cached;
+                var depth = 1;
+                for (var variant = built; variant.Next is not null; variant = variant.Next)
+                {
+                    if (++depth >= MaxVariants)
+                    {
+                        variant.Next = null;
+                        break;
+                    }
+                }
+            }
+
+            Store(key, built);
             return true;
         }
         finally
@@ -159,7 +212,19 @@ public sealed class ResourceMaterializationCache
                 ComputeState = inputs.ComputeState,
             };
             var cachedTable = cached.Snapshot.FlattenedResourceTable;
-            if (!ResourceMaterializer.TryEvaluateTable(plan, recording, out var table) || recorder.Failed || table.Length != cachedTable.Length)
+            ReadingTable = true;
+            bool evaluated;
+            uint[] table;
+            try
+            {
+                evaluated = ResourceMaterializer.TryEvaluateTable(plan, recording, out table);
+            }
+            finally
+            {
+                ReadingTable = false;
+            }
+
+            if (!evaluated || recorder.Failed || table.Length != cachedTable.Length)
                 return false;
 
             foreach (var (address, word, _, _) in recorder.Reads)
@@ -197,6 +262,7 @@ public sealed class ResourceMaterializationCache
                     DeviceAddressRanges = previous.DeviceAddressRanges,
                 },
                 Specialization = cached.Specialization,
+                Next = cached.Next,
             };
             Store(key, refreshed);
             return true;
@@ -289,16 +355,22 @@ public sealed class ResourceMaterializationCache
         _young[key] = entry;
     }
 
-    private bool Validate(Entry entry, ResidentGuestBytesReader residentReader)
+    private bool Validate(Entry entry, ResidentGuestBytesReader residentReader, out bool unreadable)
     {
+        unreadable = false;
         for (var index = 0; index < entry.RangeAddresses.Length; index++)
         {
             var length = entry.RangeLengths[index];
             if (_scratch.Length < length)
                 _scratch = new byte[Math.Max(length, _scratch.Length * 2)];
             var current = _scratch.AsSpan(0, length);
-            if (!residentReader(entry.RangeAddresses[index], current, entry.RangeClean[index]) ||
-                !current.SequenceEqual(entry.Bytes.AsSpan(entry.RangeOffsets[index], length)))
+            if (!residentReader(entry.RangeAddresses[index], current, entry.RangeClean[index]))
+            {
+                unreadable = true;
+                return false;
+            }
+
+            if (!current.SequenceEqual(entry.Bytes.AsSpan(entry.RangeOffsets[index], length)))
                 return false;
         }
 
@@ -322,6 +394,7 @@ public sealed class ResourceMaterializationCache
         public required byte[] Bytes { get; init; }
         public required ResourceSnapshot Snapshot { get; init; }
         public required ResourceSpecialization Specialization { get; init; }
+        public Entry? Next { get; set; }
 
         public bool Matches(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
         {
@@ -348,7 +421,11 @@ public sealed class ResourceMaterializationCache
         {
             _recordRead = (ulong address, out uint word) => Read(_reader!, address, out word, clean: false);
             _recordCleanRead = (ulong address, out uint word) => Read(_cleanReader!, address, out word, clean: true);
-            TablePhase = inTable => _inTable = inTable;
+            TablePhase = inTable =>
+            {
+                _inTable = inTable;
+                ReadingTable = inTable;
+            };
         }
 
         public void Reset()

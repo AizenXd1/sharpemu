@@ -109,6 +109,27 @@ public sealed class ResourceMaterializationCacheTests
     }
 
     [Fact]
+    public void AlternatingDescriptorsReuseEveryRecentVariant()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache();
+        var word = HeapBase + 0x100 + 5 * 32;
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var first, out _));
+        heap.Words[word] = 0x3000;
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var second, out _));
+        Assert.Equal((0, 2), (cache.Hits, cache.Misses));
+
+        heap.Words[word] = 0x1000;
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var firstAgain, out _));
+        heap.Words[word] = 0x3000;
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var secondAgain, out _));
+        Assert.Same(first, firstAgain);
+        Assert.Same(second, secondAgain);
+        Assert.Equal((2, 2), (cache.Hits, cache.Misses));
+    }
+
+    [Fact]
     public void AChangedMaskMaterializesAgain()
     {
         var plan = Plan();
