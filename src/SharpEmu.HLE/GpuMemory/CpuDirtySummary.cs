@@ -12,6 +12,11 @@ public sealed class CpuDirtySummary
 {
     private const int WordBits = 64;
     private readonly long[] _words = new long[(TrackerLayout.BlockCount + WordBits - 1) / WordBits];
+    private long _epoch;
+
+    public long Epoch => Volatile.Read(ref _epoch);
+
+    public void NoteDirtied() => Interlocked.Increment(ref _epoch);
 
     public void Set(ulong block, bool dirty)
     {

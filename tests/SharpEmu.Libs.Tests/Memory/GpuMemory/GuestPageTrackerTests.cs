@@ -153,6 +153,25 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, Page * 2);
     }
 
+    [NativePageProtectionFact]
+    public void LockFreeCpuDirtyQueryAgreesWithTheLockedQuery()
+    {
+        var address = Allocate(2);
+        Assert.True(_tracker.MayHaveCpuDirtyPages(address, Page * 2));
+
+        _tracker.ForEachUploadRange(address, Page * 2, false, NoRange, NoUpload, preserveCpuWriteHotPages: false);
+        Assert.False(_tracker.HasCpuDirtyPages(address, Page * 2));
+        Assert.False(_tracker.MayHaveCpuDirtyPages(address, Page * 2));
+
+        _tracker.MarkCpuDirtyPages(address + Page + 16, 32);
+        Assert.False(_tracker.MayHaveCpuDirtyPages(address, Page));
+        Assert.True(_tracker.MayHaveCpuDirtyPages(address, Page * 2));
+        Assert.True(_tracker.MayHaveCpuDirtyPages(address + Page + 64, 4));
+
+        _tracker.UntrackMemory(address, Page * 2);
+        Release(address, Page * 2);
+    }
+
     // The lock-free block summary must agree with the precise page masks through every
     // CPU-dirty transition: upload, explicit mark, write-fault invalidation and GPU writes.
     [NativePageProtectionFact]

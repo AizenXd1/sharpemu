@@ -35,6 +35,34 @@ public sealed class GuestPageTracker
         });
     }
 
+    public bool MayHaveCpuDirtyPages(ulong vaddr, ulong size)
+    {
+        if (IsKnownCpuClean(vaddr, size))
+        {
+            return false;
+        }
+
+        var remaining = size;
+        var index = vaddr / BlockBytes;
+        var offset = vaddr % BlockBytes;
+        while (remaining != 0)
+        {
+            var bytes = Math.Min(BlockBytes - offset, remaining);
+            if (Volatile.Read(ref _regions[index]) is not { } region || region.IsModified(WriteOrigin.Cpu, offset, bytes))
+            {
+                return true;
+            }
+
+            remaining -= bytes;
+            offset = 0;
+            index++;
+        }
+
+        return false;
+    }
+
+    public long CpuDirtyEpoch => _cpuDirtySummary.Epoch;
+
     public bool HasGpuDirtyPages(ulong vaddr, ulong size)
     {
         RejectUploadCallbackReentry();
