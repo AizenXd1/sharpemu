@@ -241,6 +241,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         if (isWritten)
         {
             buffer.NoteGpuWrite();
+            if (Diagnostics.DccWriterTrace.Enabled)
+            {
+                Diagnostics.DccWriterTrace.Record(RequireImageCache(), guestAddress, size);
+            }
+
             if (!_gpuModifiedRanges.Contains(guestAddress, size))
             {
                 _gpuModifiedRanges.Add(guestAddress, size);
