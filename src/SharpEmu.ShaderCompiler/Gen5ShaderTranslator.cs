@@ -24,8 +24,20 @@ public static partial class Gen5ShaderTranslator
 
     private sealed class FusedProgramRegistry
     {
-        public object Gate { get; } = new();
-        public Dictionary<ulong, FusedShaderParts> FusedPrograms { get; } = new();
+        private readonly object _gate = new();
+        private Dictionary<ulong, FusedShaderParts> _programs = new();
+
+        public bool TryGet(ulong entryAddress, out FusedShaderParts? parts) =>
+            Volatile.Read(ref _programs).TryGetValue(entryAddress, out parts);
+
+        public void Set(ulong entryAddress, FusedShaderParts parts)
+        {
+            lock (_gate)
+            {
+                var next = new Dictionary<ulong, FusedShaderParts>(_programs) { [entryAddress] = parts };
+                Volatile.Write(ref _programs, next);
+            }
+        }
     }
 
     private sealed record FusedShaderParts(
@@ -53,13 +65,10 @@ public static partial class Gen5ShaderTranslator
         }
 
         var registry = _fusedProgramsByMemory.GetValue(ctx.Memory, static _ => new FusedProgramRegistry());
-        lock (registry.Gate)
-        {
-            registry.FusedPrograms[entryAddress] = new FusedShaderParts(
-                entryHeaderAddress,
-                continuationAddress,
-                continuationHeaderAddress);
-        }
+        registry.Set(entryAddress, new FusedShaderParts(
+            entryHeaderAddress,
+            continuationAddress,
+            continuationHeaderAddress));
     }
 
     // The continuation registered for an entry address, when the guest joined two code objects.
@@ -70,12 +79,7 @@ public static partial class Gen5ShaderTranslator
         out ulong continuationHeaderAddress)
     {
         var registry = _fusedProgramsByMemory.GetValue(ctx.Memory, static _ => new FusedProgramRegistry());
-        FusedShaderParts? parts;
-        lock (registry.Gate)
-        {
-            registry.FusedPrograms.TryGetValue(entryAddress, out parts);
-        }
-
+        registry.TryGet(entryAddress, out var parts);
         continuationAddress = parts?.ContinuationAddress ?? 0;
         continuationHeaderAddress = parts?.ContinuationHeaderAddress ?? 0;
         return parts is not null;
@@ -108,12 +112,7 @@ public static partial class Gen5ShaderTranslator
     {
         ValidateDppControlVectors();
         var registry = _fusedProgramsByMemory.GetValue(ctx.Memory, static _ => new FusedProgramRegistry());
-        FusedShaderParts? fusedParts;
-        lock (registry.Gate)
-        {
-            registry.FusedPrograms.TryGetValue(address, out fusedParts);
-        }
-
+        registry.TryGet(address, out var fusedParts);
         if (fusedParts is not null)
         {
             return TryDecodeFusedProgram(ctx, address, fusedParts, out program, out error);
