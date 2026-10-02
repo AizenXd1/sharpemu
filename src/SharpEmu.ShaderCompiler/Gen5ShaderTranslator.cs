@@ -98,6 +98,21 @@ public static partial class Gen5ShaderTranslator
         return parts is not null;
     }
 
+    public static bool TryGetFusedProgramParts(
+        CpuContext ctx,
+        ulong entryAddress,
+        out ulong entryHeaderAddress,
+        out ulong continuationAddress,
+        out ulong continuationHeaderAddress)
+    {
+        var registry = GetFusedPrograms(ctx.Memory);
+        registry.TryGet(entryAddress, out var parts);
+        entryHeaderAddress = parts?.EntryHeaderAddress ?? 0;
+        continuationAddress = parts?.ContinuationAddress ?? 0;
+        continuationHeaderAddress = parts?.ContinuationHeaderAddress ?? 0;
+        return parts is not null;
+    }
+
     public static string Describe(CpuContext ctx, ulong exportShaderAddress, ulong pixelShaderAddress)
     {
         var es = TryDecodeProgram(ctx, exportShaderAddress, out var esProgram, out var esError)
