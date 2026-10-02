@@ -103,6 +103,7 @@ internal sealed class ShaderProgramCache
     private readonly IShaderPipelineHost _host;
     private readonly Dictionary<ProgramKey, ProgramSourceEntry> _programs = new();
     private readonly Dictionary<(ulong Hash, uint CodeSize), Gen5ShaderProgram> _decoded = new();
+    private readonly Dictionary<(ulong Hash, uint CodeSize), ShaderCodeCapture> _codeCaptures = new();
     private readonly List<uint> _staticState = new(StageStaticKey.MaxWords);
     // Draws that re-bind unchanged resources reuse the last materialization.
     // SHARPEMU_RESOURCE_CACHE=0 materializes every draw, for A/B comparisons.
@@ -147,12 +148,30 @@ internal sealed class ShaderProgramCache
             return program;
         }
 
-        if (!Gen5ShaderTranslator.TryDecodeProgram(_context, source.Address, out program, out var error))
+        var recording = _host.ShaderPrewarm is not null ? new RecordingCpuMemory(_context.Memory) : null;
+        var context = recording is null ? _context : new CpuContext(recording, _context.TargetGeneration);
+        if (!Gen5ShaderTranslator.TryDecodeProgram(context, source.Address, out program, out var error))
         {
             throw SubmissionScheduler.Fatal($"The shader program cannot be decoded: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} error={error}.");
         }
 
         _decoded.Add(key, program);
+        if (recording is not null)
+        {
+            _codeCaptures[key] = new ShaderCodeCapture
+            {
+                Hash = source.Hash,
+                CodeSize = source.CodeSize,
+                Address = source.Address,
+                Generation = _context.TargetGeneration,
+                Fused = Gen5ShaderTranslator.TryGetFusedProgramParts(
+                    _context, source.Address, out var entryHeader, out var continuation, out var continuationHeader)
+                    ? new FusedCodeParts(entryHeader, continuation, continuationHeader)
+                    : null,
+                Ranges = recording.TakeRanges(),
+            };
+        }
+
         return program;
     }
 
@@ -491,14 +510,8 @@ internal sealed class ShaderProgramCache
         try
         {
             resources = ResourceMaterializer.ApplyTo(plan, specialization);
-            layout = BindingLayout.Allocate(
-                resources.Info,
-                BindingLayout.CollectUserDataRegisters(program, source.UserDataBase, (uint)source.UserData.Length),
-                BindingLayout.UsesGlobalDataShare(program),
-                ShaderCompileRequest.RequiresFlattenedTable(plan, resources),
-                BindingLayout.ReadsShaderBase(program),
-                pushDataCursor,
-                usesDispatchThreadLimits: source.Stage == ShaderStage.Compute && options.ComputeInfo!.DispatchThreadDimensions);
+            layout = AllocateLayout(program, plan, resources, source.UserDataBase, (uint)source.UserData.Length, pushDataCursor,
+                source.Stage == ShaderStage.Compute && options.ComputeInfo!.DispatchThreadDimensions);
         }
         catch (ResourcePlanException exception)
         {
@@ -542,6 +555,24 @@ internal sealed class ShaderProgramCache
         var id = ++_nextProgramId;
         var module = _host.CreateShaderModule(compiled, source.Stage, source.Hash, id);
         var info = CreateProgramInfo(source, entry, resources, layout, request);
+        if (source.Stage == ShaderStage.Compute &&
+            _host.ShaderPrewarm is { } prewarm &&
+            _codeCaptures.TryGetValue((source.Hash, source.CodeSize), out var capture))
+        {
+            prewarm.RecordCompute(capture, new ComputePrewarmRecord
+            {
+                Hash = source.Hash,
+                CodeSize = source.CodeSize,
+                Address = capture.Address,
+                UserDataBase = source.UserDataBase,
+                UserDataCount = (uint)source.UserData.Length,
+                PushDataCursor = pushDataCursor,
+                Info = options.ComputeInfo!,
+                SystemRegisters = options.ComputeSystemRegisters,
+                Specialization = specialization.Clone(),
+            });
+        }
+
         return new ProgramPermutation
         {
             Specialization = specialization,
@@ -608,22 +639,63 @@ internal sealed class ShaderProgramCache
             }
 
             default:
+                return BuildComputeRequest(entry.Plan, resources, layout, options.ComputeInfo!, options.ComputeSystemRegisters,
+                    sharedInt64Atomics, _host.ExecGuardElisionEnabled);
+        }
+    }
+
+    private static BindingLayout AllocateLayout(Gen5ShaderProgram program, ShaderResourcePlan plan, SpecializedResourceInfo resources,
+        uint userDataBase, uint userDataCount, uint pushDataCursor, bool usesDispatchThreadLimits) =>
+        BindingLayout.Allocate(
+            resources.Info,
+            BindingLayout.CollectUserDataRegisters(program, userDataBase, userDataCount),
+            BindingLayout.UsesGlobalDataShare(program),
+            ShaderCompileRequest.RequiresFlattenedTable(plan, resources),
+            BindingLayout.ReadsShaderBase(program),
+            pushDataCursor,
+            usesDispatchThreadLimits: usesDispatchThreadLimits);
+
+    private static ShaderCompileRequest BuildComputeRequest(ShaderResourcePlan plan, SpecializedResourceInfo resources, BindingLayout layout,
+        ComputeInputInfo info, Gen5ComputeSystemRegisters? systemRegisters, bool sharedInt64Atomics, bool execGuardElision) =>
+        new(plan, resources, layout)
+        {
+            WaveSize = info.WaveSize,
+            EnableExecGuardElision = info.WaveSize != 64 || execGuardElision,
+            TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
+            ScratchDwords = info.ScratchDwords,
+            SupportsSharedInt64Atomics = sharedInt64Atomics,
+            ComputeSystemRegisters = systemRegisters,
+            LocalDataShareDwords = info.LocalDataShareDwords,
+            LocalSizeX = Math.Max(info.ThreadsX, 1),
+            LocalSizeY = Math.Max(info.ThreadsY, 1),
+            LocalSizeZ = Math.Max(info.ThreadsZ, 1),
+        };
+
+    internal static bool TryCompilePrewarm(ComputePrewarmRecord record, ShaderCodeCapture code, IGuestGpuBackend compiler,
+        bool sharedInt64Atomics, bool execGuardElision, out IGuestCompiledShader? compiled, out BindingLayout? layout, out string error)
+    {
+        compiled = null;
+        layout = null;
+        try
+        {
+            if (!Gen5ShaderTranslator.TryDecodeProgram(code.CreateContext(), code.Address, out var program, out error))
             {
-                var info = options.ComputeInfo!;
-                return new ShaderCompileRequest(entry.Plan, resources, layout)
-                {
-                    WaveSize = info.WaveSize,
-                    EnableExecGuardElision = info.WaveSize != 64 || _host.ExecGuardElisionEnabled,
-                    TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
-                    ScratchDwords = info.ScratchDwords,
-                    SupportsSharedInt64Atomics = sharedInt64Atomics,
-                    ComputeSystemRegisters = options.ComputeSystemRegisters,
-                    LocalDataShareDwords = info.LocalDataShareDwords,
-                    LocalSizeX = Math.Max(info.ThreadsX, 1),
-                    LocalSizeY = Math.Max(info.ThreadsY, 1),
-                    LocalSizeZ = Math.Max(info.ThreadsZ, 1),
-                };
+                return false;
             }
+
+            var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, record.Hash, record.UserDataBase, record.UserDataCount,
+                waveSize: record.Info.WaveSize);
+            var resources = ResourceMaterializer.ApplyTo(plan, record.Specialization);
+            layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor,
+                record.Info.DispatchThreadDimensions);
+            var request = BuildComputeRequest(plan, resources, layout, record.Info, record.SystemRegisters,
+                sharedInt64Atomics, execGuardElision);
+            return compiler.TryCompileProgram(request, out compiled, out error) && compiled is not null;
+        }
+        catch (Exception exception)
+        {
+            error = exception.Message;
+            return false;
         }
     }
 

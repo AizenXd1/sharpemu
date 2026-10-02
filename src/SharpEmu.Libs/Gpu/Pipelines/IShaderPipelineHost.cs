@@ -42,6 +42,7 @@ internal interface IShaderPipelineHost
     // emitted as real 64-bit atomics instead of a non-atomic 32-bit pair.
     bool SharedInt64AtomicsEnabled { get; }
     bool ExecGuardElisionEnabled => true;
+    ShaderPrewarmList? ShaderPrewarm => null;
     bool PerVertexPixelInputsSupported => true;
 
     RenderHostLimits Limits { get; }

@@ -20,7 +20,7 @@ internal sealed class FakeCompiledShader(ShaderCompileRequest request, byte[]? s
 
     public byte[] Spirv => spirv ?? [];
 
-    public byte[] Payload => [];
+    public byte[] Payload => Spirv;
 
     public string PayloadFileExtension => "fake";
 }
@@ -45,6 +45,8 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
     public bool GraphicsSubgroupOperationsEnabled => true;
 
     public bool SharedInt64AtomicsEnabled => false;
+
+    public ShaderPrewarmList? ShaderPrewarm { get; set; }
 
     public RenderHostLimits Limits => new(16384, 16384, 16384, 16384);
 
