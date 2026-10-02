@@ -54,6 +54,11 @@ internal static unsafe partial class VulkanVideoPresenter
         // Reading a mature driver cache can itself take several seconds. Keep the
         // render thread focused on pipeline warm-up; teardown still saves eagerly.
         private const long PipelineCacheCheckpointIntervalMs = 300_000;
+        private const long PipelineCacheRetryMs = 1_000;
+        private long _pipelineCacheRetryTick;
+        private const ulong MaxPipelineCacheBytes = 256UL * 1024 * 1024;
+        private HashSet<string>? _resetPipelineCachePaths;
+        private nuint _pipelineCacheSavedBytes;
         private Queue _queue;
         private uint _queueFamilyIndex;
 
@@ -1247,6 +1252,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
+            if (initialData.Length != 0 && QueryPipelineCacheSize(_pipelineCache) is { } loadedBytes)
+            {
+                _pipelineCacheSavedBytes = loadedBytes;
+            }
+
             SetDebugName(
                 ObjectType.PipelineCache,
                 _pipelineCache.Handle,
@@ -1338,16 +1348,31 @@ internal static unsafe partial class VulkanVideoPresenter
             // frame, so saving after every slow creation compounds a warm-up
             // hitch into a multi-minute stall. Coalesce all creations into one
             // periodic snapshot; shutdown still forces a final save.
-            if (Environment.TickCount64 - _lastPipelineCacheSaveTick >= PipelineCacheCheckpointIntervalMs)
+            CheckpointPipelineCache();
+        }
+
+        private void CheckpointPipelineCache()
+        {
+            if (!_pipelineCacheDirty || _pipelineCachePath is null)
             {
-                SavePipelineCache(force: false);
+                return;
             }
+
+            var now = Environment.TickCount64;
+            if (now - _lastPipelineCacheSaveTick < PipelineCacheCheckpointIntervalMs || now < _pipelineCacheRetryTick)
+            {
+                return;
+            }
+
+            _pipelineCacheRetryTick = now + PipelineCacheRetryMs;
+            SavePipelineCache(force: false);
         }
 
         private void SavePipelineCache(bool force)
         {
             // Cache export must not race asynchronous pipeline creation.
             if (_pendingComputePipelines.Values.Any(pending => !pending.Compile.IsCompleted)) return;
+            _lastPipelineCacheSaveTick = Environment.TickCount64;
             SaveGuestPipelineCaches();
             if (_pipelineCache.Handle == 0 || string.IsNullOrWhiteSpace(_pipelineCachePath))
             {
@@ -1359,15 +1384,30 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
-            if (SaveDriverPipelineCache(_pipelineCache, _pipelineCachePath))
+            if (QueryPipelineCacheSize(_pipelineCache) is { } size && size == _pipelineCacheSavedBytes)
             {
                 _pipelineCacheDirty = false;
-                _lastPipelineCacheSaveTick = Environment.TickCount64;
+                return;
+            }
+
+            if (SaveDriverPipelineCache(_pipelineCache, _pipelineCachePath, MaxPipelineCacheBytes, out var savedBytes))
+            {
+                _pipelineCacheDirty = false;
+                _pipelineCacheSavedBytes = savedBytes;
+                Console.Error.WriteLine(
+                    $"[LOADER][INFO] Vulkan pipeline cache saved: path={_pipelineCachePath} bytes={savedBytes}");
             }
         }
 
-        private bool SaveDriverPipelineCache(PipelineCache cache, string path)
+        private nuint? QueryPipelineCacheSize(PipelineCache cache)
         {
+            nuint size = 0;
+            return _vk.GetPipelineCacheData(_device, cache, &size, null) == Result.Success ? size : null;
+        }
+
+        private bool SaveDriverPipelineCache(PipelineCache cache, string path, ulong byteLimit, out nuint savedBytes)
+        {
+            savedBytes = 0;
             try
             {
                 nuint size = 0;
@@ -1376,11 +1416,24 @@ internal static unsafe partial class VulkanVideoPresenter
                     cache,
                     &size,
                     null);
-                if (result != Result.Success || size == 0 || size > 256u * 1024u * 1024u)
+                if (result != Result.Success || size == 0)
                 {
                     Console.Error.WriteLine(
                         $"[LOADER][WARN] Vulkan pipeline cache query failed: result={result} size={size}");
                     return false;
+                }
+
+                if (size > byteLimit)
+                {
+                    if ((_resetPipelineCachePaths ??= new HashSet<string>(StringComparer.Ordinal)).Add(path))
+                    {
+                        WritePipelineCacheFile(path, []);
+                        Console.Error.WriteLine(
+                            $"[LOADER][INFO] Vulkan pipeline cache outgrew its limit; the next launch starts a fresh cache: path={path} bytes={size} limit={byteLimit}");
+                    }
+
+                    savedBytes = size;
+                    return true;
                 }
 
                 var data = new byte[checked((int)size)];
@@ -1405,17 +1458,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     Array.Resize(ref data, checked((int)size));
                 }
 
-                var directory = Path.GetDirectoryName(path);
-                if (!string.IsNullOrWhiteSpace(directory))
-                {
-                    Directory.CreateDirectory(directory);
-                }
-
-                var temporaryPath = path + $".{Environment.ProcessId}.tmp";
-                File.WriteAllBytes(temporaryPath, PipelineCacheSignature.Wrap(DriverCacheSignature(), data));
-                File.Move(temporaryPath, path, overwrite: true);
-                Console.Error.WriteLine(
-                    $"[LOADER][INFO] Vulkan pipeline cache saved: path={path} bytes={data.Length}");
+                WritePipelineCacheFile(path, data);
+                savedBytes = size;
                 return true;
             }
             catch (Exception exception)
@@ -1424,6 +1468,19 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"[LOADER][WARN] Vulkan pipeline cache save failed: {exception.Message}");
                 return false;
             }
+        }
+
+        private void WritePipelineCacheFile(string path, ReadOnlySpan<byte> data)
+        {
+            var directory = Path.GetDirectoryName(path);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            var temporaryPath = path + $".{Environment.ProcessId}.tmp";
+            File.WriteAllBytes(temporaryPath, PipelineCacheSignature.Wrap(DriverCacheSignature(), data));
+            File.Move(temporaryPath, path, overwrite: true);
         }
 
         private void CreateCommandResources()

@@ -100,7 +100,7 @@ internal static unsafe partial class VulkanVideoPresenter
             foreach (var shard in _pipelineCacheShards.Values)
             {
                 if (shard.Dirty && shard.Cache.IsValueCreated && shard.Cache.Value.Handle != 0 &&
-                    SaveDriverPipelineCache(shard.Cache.Value, shard.Path))
+                    SaveDriverPipelineCache(shard.Cache.Value, shard.Path, MaxPipelineCacheBytes, out _))
                     shard.Dirty = false;
             }
         }
