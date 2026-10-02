@@ -24,6 +24,9 @@ public sealed class CommandStreamQueueTests
     private static uint[] WaitEqual(ulong address, uint reference) =>
         StreamRunner.Packet(PacketOpcode.WaitRegisterMemory, 0x13u, StreamRunner.Low(address), StreamRunner.High(address), reference, 0xFFFF_FFFFu, 0);
 
+    private static uint[] WriteLabel(ulong address, uint value) =>
+        StreamRunner.Packet(PacketOpcode.WriteData, 0x00000500u, StreamRunner.Low(address), StreamRunner.High(address), value);
+
     private static (RecordingCommandStreamHost Host, CommandStreamQueue Queue) NewQueue()
     {
         var host = new RecordingCommandStreamHost();
@@ -426,5 +429,75 @@ public sealed class CommandStreamQueueTests
         Assert.Equal(SliceResult.Completed, queue.ProcessOne());
         Assert.Equal(SliceResult.Completed, queue.ProcessOne());
         Assert.Equal(IdleOutcome.Completed, await guest.WaitAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PairedLabelWait_SurvivesTheNextFramesResetWithRunAhead(bool is64Bit)
+    {
+        var host = new RecordingCommandStreamHost();
+        var queue = new CommandStreamQueue(host, boundariesInFlight: 1);
+        var packets = new List<uint[]>();
+        for (var pair = 0; pair < 7; pair++)
+        {
+            var address = Label + (ulong)pair * 8;
+            packets.Add(is64Bit
+                ? StreamRunner.Packet(PacketOpcode.WriteData, 0x00000500u,
+                    StreamRunner.Low(address), StreamRunner.High(address), 1, 2)
+                : WriteLabel(address, 1));
+            packets.Add(is64Bit
+                ? StreamRunner.Packet(PacketOpcode.WaitRegisterMemory64, 0x13u,
+                    StreamRunner.Low(address), StreamRunner.High(address), 1, 2, uint.MaxValue, uint.MaxValue, 0)
+                : WaitEqual(address, 1));
+        }
+        Enqueue(host, queue, Graphics, 1, packets.ToArray());
+        host.BeforeGuestRead = address =>
+        {
+            if (address == Label + 6 * 8) host.WriteQword(address, 0);
+        };
+
+        Assert.Equal(IdleOutcome.Completed, await Task.Run(queue.Done).WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(0, queue.FrameNumber); // CPU/GPU overlap remains enabled.
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal(0UL, host.ReadQword(Label + 6 * 8)); // The CPU reset was not overwritten.
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal(1, queue.FrameNumber);
+        Assert.Equal(0, queue.BlockedQueueCount);
+    }
+
+    [Theory]
+    [InlineData(0)] // A CPU-produced label must still be read from live memory.
+    [InlineData(1)] // Never forward a value from the preceding submission.
+    [InlineData(2)] // Never forward through work that may write the label on the GPU.
+    public void LabelWait_DoesNotForwardAnUnrelatedOrOlderStore(int scenario)
+    {
+        var (host, queue) = NewQueue();
+        host.WriteDword(Label, 0);
+        if (scenario == 0)
+        {
+            Enqueue(host, queue, Graphics, 1, WriteLabel(Label + 8, 1), WaitEqual(Label, 1));
+        }
+        else if (scenario == 1)
+        {
+            Enqueue(host, queue, Graphics, 1, WriteLabel(Label, 1));
+            Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+            host.WriteDword(Label, 0);
+            Enqueue(host, queue, Graphics + 0x100, 2, WaitEqual(Label, 1));
+        }
+        else
+        {
+            Enqueue(host, queue, Graphics, 1, WriteLabel(Label, 1),
+                StreamRunner.Packet(PacketOpcode.DrawIndexAuto, 3, 0), WaitEqual(Label, 1));
+            host.BeforeGuestRead = address =>
+            {
+                if (address == Label) host.WriteDword(Label, 0);
+            };
+        }
+        Assert.Equal(scenario == 1 ? SliceResult.BlockedWithoutProgress : SliceResult.Progressed, queue.ProcessOne());
+        host.BeforeGuestRead = null;
+        host.WriteDword(Label, 1);
+        queue.RetryBlocked();
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
     }
 }
