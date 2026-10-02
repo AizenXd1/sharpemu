@@ -34,7 +34,13 @@ public sealed partial class GuestImageCache
     {
         var pressured = _totalUsedMemory >= _memoryPressureBytes;
         var aggressive = allowAggressive && _totalUsedMemory >= _criticalMemoryBytes;
-        var age = Math.Min(aggressive ? 160UL : pressured ? 80UL : 16UL, tick);
+        var age = aggressive ? 160UL : pressured ? 80UL : 16UL;
+        if (tick < age && !pressured && !aggressive)
+        {
+            return;
+        }
+
+        age = Math.Min(age, tick);
         var deletions = aggressive ? 40 : pressured ? 20 : 10;
         var candidates = new List<ResourceSlotIdentifier>(deletions);
         // Deleting a depth image also deletes its stencil association, so the recency walk ends first.
