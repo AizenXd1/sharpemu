@@ -42,6 +42,8 @@ public sealed class ShaderResourcePlan
     public bool RequiresSpecializationMemory { get; private set; }
     public ShaderResourceInfo Info { get; private set; } = new();
 
+    internal RawReadPrefetchPlan? RawReadPrefetch { get; set; }
+
     // The handles each memory access reads, after flattened reads were replaced.
     public MemoryAccessBinding?[] Accesses { get; private set; } = [];
 

@@ -63,7 +63,7 @@ public sealed class ResourceMaterializationCache
         var refreshes = Interlocked.Exchange(ref _totalRefreshes, 0);
         var total = hits + misses;
         return FormattableString.Invariant(
-            $"[PERF][RESOURCE_CACHE] hits={hits} misses={misses} stale={stale} stale_unreadable={staleUnreadable} refreshes={refreshes} uncacheable={uncacheable} hit_rate={(total == 0 ? 0 : hits * 100.0 / total):F1}%");
+            $"[PERF][RESOURCE_CACHE] hits={hits} misses={misses} stale={stale} stale_unreadable={staleUnreadable} refreshes={refreshes} uncacheable={uncacheable} hit_rate={(total == 0 ? 0 : hits * 100.0 / total):F1}% {RawReadPrefetch.TakeReport()}");
     }
 
     public bool Materialize(
@@ -130,6 +130,8 @@ public sealed class ResourceMaterializationCache
                 ShaderBase = inputs.ShaderBase,
                 ReadMemory = recorder.Wrap(inputs.ReadMemory, clean: false),
                 ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
+                ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
+                ReadsClean = inputs.ReadsClean,
                 ComputeState = inputs.ComputeState,
                 TablePhase = recorder.TablePhase,
             };
@@ -209,6 +211,8 @@ public sealed class ResourceMaterializationCache
                 ShaderBase = inputs.ShaderBase,
                 ReadMemory = recorder.Wrap(inputs.ReadMemory, clean: false),
                 ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
+                ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
+                ReadsClean = inputs.ReadsClean,
                 ComputeState = inputs.ComputeState,
             };
             var cachedTable = cached.Snapshot.FlattenedResourceTable;
@@ -414,13 +418,16 @@ public sealed class ResourceMaterializationCache
         private bool _inTable;
         private GuestWordReader? _reader;
         private GuestWordReader? _cleanReader;
+        private ResidentGuestBytesReader? _residentReader;
         private readonly GuestWordReader _recordRead;
         private readonly GuestWordReader _recordCleanRead;
+        private readonly ResidentGuestBytesReader _recordResidentRead;
 
         public ReadRecorder()
         {
             _recordRead = (ulong address, out uint word) => Read(_reader!, address, out word, clean: false);
             _recordCleanRead = (ulong address, out uint word) => Read(_cleanReader!, address, out word, clean: true);
+            _recordResidentRead = (ulong address, Span<byte> destination, bool clean) => ReadResident(address, destination, clean);
             TablePhase = inTable =>
             {
                 _inTable = inTable;
@@ -437,6 +444,7 @@ public sealed class ResourceMaterializationCache
                 _reads.Capacity = 0;
             _reader = null;
             _cleanReader = null;
+            _residentReader = null;
             _inTable = false;
             Failed = false;
         }
@@ -468,6 +476,25 @@ public sealed class ResourceMaterializationCache
                 return false;
             }
             _reads.Add((address, word, clean, _inTable));
+            return true;
+        }
+
+        public ResidentGuestBytesReader? WrapResident(ResidentGuestBytesReader? inner)
+        {
+            if (inner is null)
+                return null;
+            _residentReader = inner;
+            return _recordResidentRead;
+        }
+
+        private bool ReadResident(ulong address, Span<byte> destination, bool clean)
+        {
+            if (!_residentReader!(address, destination, clean))
+                return false;
+
+            for (var offset = 0; offset + sizeof(uint) <= destination.Length; offset += sizeof(uint))
+                _reads.Add((address + (ulong)offset,
+                    System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(destination[offset..]), clean, _inTable));
             return true;
         }
 

@@ -116,11 +116,22 @@ internal sealed class ShaderProgramCache
     // (~4 % of the Demon's Souls render thread) for a debug dump that is almost never on.
     private readonly bool _spirvDumpEnabled = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DUMP_SPIRV"), "1", StringComparison.Ordinal);
 
+    private readonly GuestWordReader _readGuestWord;
+    private readonly GuestWordReader _readCleanGuestWord;
+    private readonly ResidentGuestBytesReader _readResidentGuestBytes;
+    private readonly ResidentGuestBytesReader? _prefetchResidentGuestBytes;
+
+    private static readonly bool PrefetchEnabled = Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_PREFETCH") != "0";
+
     public ShaderProgramCache(CpuContext context, IGuestGpuBackend compiler, IShaderPipelineHost host)
     {
         _context = context;
         _compiler = compiler;
         _host = host;
+        _readGuestWord = host.TryReadGuestWord;
+        _readCleanGuestWord = host.TryReadCleanGuestWord;
+        _readResidentGuestBytes = host.TryReadResidentGuestBytes;
+        _prefetchResidentGuestBytes = PrefetchEnabled ? _readResidentGuestBytes : null;
     }
 
     public int ProgramCount => _programs.Count;
@@ -203,8 +214,9 @@ internal sealed class ShaderProgramCache
         {
             UserData = source.UserData,
             ShaderBase = source.Address,
-            ReadMemory = _host.TryReadGuestWord,
-            ReadCleanMemory = _host.TryReadCleanGuestWord,
+            ReadMemory = _readGuestWord,
+            ReadCleanMemory = _readCleanGuestWord,
+            ReadResidentMemory = _prefetchResidentGuestBytes,
             ComputeState = source.Stage == ShaderStage.Compute && options.ComputeInfo is { } computeState
                 ? new ComputeSelectorState(computeState.WaveSize, Math.Max(computeState.ThreadsX, 1),
                     Math.Max(computeState.ThreadsY, 1), Math.Max(computeState.ThreadsZ, 1), computeState.DispatchThreadDimensions,
@@ -231,7 +243,7 @@ internal sealed class ShaderProgramCache
         {
             // Failure capture needs the full walk, so a dump run bypasses the cache.
             var materialized = _materializations is not null && captureIndirectImageFailure is null
-                ? _materializations.Materialize(entry.Plan, inputs, _host.TryReadResidentGuestBytes, ref snapshot, ref specialization,
+                ? _materializations.Materialize(entry.Plan, inputs, _readResidentGuestBytes, ref snapshot, ref specialization,
                     out var materializationFailure)
                 : ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure,
                     captureIndirectImageFailure);
