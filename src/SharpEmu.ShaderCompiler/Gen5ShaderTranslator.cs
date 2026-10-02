@@ -18,6 +18,7 @@ public static partial class Gen5ShaderTranslator
     // reaching S_ENDPGM. Keep the malformed-shader guard, but size it to the
     // largest declared shader object accepted by the decoder (1 MiB).
     private const int MaxInstructions = (int)(MaximumDeclaredShaderSizeBytes / sizeof(uint));
+    private const ulong FusedContinuationAlignment = 0x100;
     private const ulong ShaderSizeOffset = 0x44;
     private const uint MaximumDeclaredShaderSizeBytes = 1024 * 1024;
     private static readonly ConditionalWeakTable<object, FusedProgramRegistry> _fusedProgramsByMemory = new();
@@ -159,9 +160,8 @@ public static partial class Gen5ShaderTranslator
             return false;
         }
 
-        if (parts.ContinuationAddress <= entryAddress ||
-            parts.ContinuationAddress - entryAddress > uint.MaxValue ||
-            ((parts.ContinuationAddress - entryAddress) & (sizeof(uint) - 1)) != 0)
+        var continuationDistance = unchecked(parts.ContinuationAddress - entryAddress);
+        if (parts.ContinuationAddress == entryAddress || (continuationDistance & (sizeof(uint) - 1)) != 0)
         {
             error = $"invalid-fused-layout entry=0x{entryAddress:X} " +
                 $"continuation=0x{parts.ContinuationAddress:X}";
@@ -201,7 +201,13 @@ public static partial class Gen5ShaderTranslator
             return false;
         }
 
-        var continuationPc = checked((uint)(parts.ContinuationAddress - entryAddress));
+        var lastEntryInstruction = entryProgram.Instructions[^1];
+        var entryEnd = (ulong)lastEntryInstruction.Pc + (ulong)lastEntryInstruction.Words.Count * sizeof(uint);
+        var adjacent = parts.ContinuationAddress > entryAddress && continuationDistance <= uint.MaxValue &&
+            continuationDistance >= entryEnd;
+        var continuationPc = adjacent
+            ? (uint)continuationDistance
+            : (uint)((entryEnd + FusedContinuationAlignment - 1) & ~(FusedContinuationAlignment - 1));
         var instructions = new List<Gen5ShaderInstruction>(
             entryProgram.Instructions.Count + continuationProgram.Instructions.Count);
         instructions.AddRange(entryProgram.Instructions.Take(entryProgram.Instructions.Count - 1));
@@ -227,7 +233,9 @@ public static partial class Gen5ShaderTranslator
                 return false;
             }
 
-            instructions.Add(instruction with { Pc = (uint)rebasedPc });
+            instructions.Add(adjacent
+                ? instruction with { Pc = (uint)rebasedPc }
+                : instruction with { Pc = (uint)rebasedPc, AddressOffset = unchecked(continuationDistance + instruction.ProgramOffset) });
         }
 
         program = new Gen5ShaderProgram(entryAddress, instructions);

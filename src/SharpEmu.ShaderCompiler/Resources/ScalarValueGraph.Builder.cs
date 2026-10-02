@@ -501,7 +501,7 @@ public sealed partial class ScalarValueGraph
                 case "SGetpcB64":
                 {
                     var address = _graph.Operation(ScalarOperation.IAdd64, ScalarValueType.U64, _graph.ShaderBase(),
-                        _graph.Constant((ulong)instruction.Pc + (ulong)(instruction.Words.Count * sizeof(uint))));
+                        _graph.Constant(unchecked(instruction.ProgramOffset + (ulong)(instruction.Words.Count * sizeof(uint)))));
                     state.WritePair(destinationRegister, Extract(address, 0), Extract(address, 1));
                     return;
                 }

@@ -104,7 +104,7 @@ internal static class ScalarGraphDiskCache
             writer.Write(program.Instructions.Count);
             foreach (var instruction in program.Instructions)
             {
-                writer.Write(instruction.Pc); writer.Write((int)instruction.Encoding); writer.Write(instruction.Opcode);
+                writer.Write(instruction.Pc); writer.Write(instruction.ProgramOffset); writer.Write((int)instruction.Encoding); writer.Write(instruction.Opcode);
                 writer.Write(instruction.Words.Count);
                 foreach (var word in instruction.Words) writer.Write(word);
                 writer.Write(instruction.Sources.Count);

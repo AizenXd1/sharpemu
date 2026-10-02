@@ -1116,7 +1116,7 @@ public static partial class Gen5MslTranslator
                 {
                     // The shader base is pushed per draw; the program offset is added to it.
                     var (baseLow, baseHigh) = ShaderBaseWords();
-                    var offset = instruction.Pc + (ulong)(instruction.Words.Count * sizeof(uint));
+                    var offset = unchecked(instruction.ProgramOffset + (ulong)(instruction.Words.Count * sizeof(uint)));
                     var address = Temp("ulong", $"((ulong){baseLow} | ((ulong){baseHigh} << 32)) + {offset}ul");
                     StoreScalar(destination, $"(uint){address}");
                     StoreScalar(destination + 1, $"(uint)({address} >> 32)");

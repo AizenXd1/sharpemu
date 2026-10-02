@@ -2616,7 +2616,7 @@ public static partial class Gen5SpirvTranslator
                     var (baseLow, baseHigh) = LoadShaderBase();
                     var next = IAdd64(
                         Pair64(baseLow, baseHigh),
-                        ULong(instruction.Pc + (ulong)(instruction.Words.Count * sizeof(uint))));
+                        ULong(unchecked(instruction.ProgramOffset + (ulong)(instruction.Words.Count * sizeof(uint)))));
                     StoreS(destination, Narrow(next));
                     StoreS(destination + 1, Narrow(ShiftRightLogical64(next, ULong(32))));
                     return true;
