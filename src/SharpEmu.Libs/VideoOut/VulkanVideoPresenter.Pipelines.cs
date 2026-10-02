@@ -1086,6 +1086,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _shaderModules.Clear();
+            _shaderModuleCacheIdentities.Clear();
         }
     }
 }
