@@ -196,7 +196,20 @@ internal static unsafe partial class VulkanVideoPresenter
                 SliceResult result;
                 using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.CommandStream))
                 {
-                    result = _commandStream.ProcessOne();
+                    var aliasAccess = _guestBacking?.TryEnterBackingAliasAccess() == true;
+                    _backingAliasAccess = aliasAccess;
+                    try
+                    {
+                        result = _commandStream.ProcessOne();
+                    }
+                    finally
+                    {
+                        _backingAliasAccess = false;
+                        if (aliasAccess)
+                        {
+                            _guestBacking!.ExitBackingAliasAccess();
+                        }
+                    }
                 }
 
                 switch (result)

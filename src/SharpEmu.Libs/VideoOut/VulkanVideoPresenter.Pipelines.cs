@@ -99,20 +99,43 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             using var profile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.GuestRead);
             word = 0;
-            // Resource planning can inspect a dynamic descriptor before the draw has
-            // supplied a valid guest address.  Do not pass an invalid range to the
-            // page tracker: it treats that as an emulator invariant violation and
-            // terminates the process.  A failed read lets the materializer reject or
-            // specialize the source normally.
-            if (!_guestMemory.CanRead(address, sizeof(uint)))
+            if (IsCleanReadPage(address, sizeof(uint)))
             {
-                return false;
+                if (TryGetAliasPointer(address, sizeof(uint), out var alias))
+                {
+                    word = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<uint>(alias);
+                    return true;
+                }
             }
-
-            if (!_bufferCache.TrySynchronizeCpuRead(address, sizeof(uint),
-                SharpEmu.HLE.GuestMemory.GuestMemoryProfile.ReadbackSource.ShaderResourceRead))
+            else
             {
-                return false;
+                // Resource planning can inspect a dynamic descriptor before the draw has
+                // supplied a valid guest address.  Do not pass an invalid range to the
+                // page tracker: it treats that as an emulator invariant violation and
+                // terminates the process.  A failed read lets the materializer reject or
+                // specialize the source normally.
+                if (!_guestMemory.CanRead(address, sizeof(uint)))
+                {
+                    return false;
+                }
+
+                if (_bufferCache.HasGpuDirtyBytes(address, sizeof(uint)))
+                {
+                    if (Diagnostics.GpuReadTrace.Enabled)
+                    {
+                        Diagnostics.GpuReadTrace.Record(address, ResourceMaterializationCache.ReadingTable);
+                    }
+
+                    if (!_bufferCache.TrySynchronizeCpuRead(address, sizeof(uint),
+                            SharpEmu.HLE.GuestMemory.GuestMemoryProfile.ReadbackSource.ShaderResourceRead))
+                    {
+                        return false;
+                    }
+                }
+                else
+                {
+                    NoteCleanReadPage(address, sizeof(uint));
+                }
             }
 
             Span<byte> bytes = stackalloc byte[sizeof(uint)];
@@ -156,13 +179,100 @@ internal static unsafe partial class VulkanVideoPresenter
         public bool TryReadResidentGuestBytes(ulong address, Span<byte> destination, bool clean)
         {
             var size = (ulong)destination.Length;
-            if (_bufferCache.HasGpuDirtyPages(address, size) ||
-                (clean && (_bufferCache.HasGpuDirtyBytes(address, size) || _imageCache.HasGpuModifiedImageBytes(address, size))))
+            if (clean || !IsCleanReadPage(address, size))
+            {
+                if (!_guestMemory.CanRead(address, size) ||
+                    _bufferCache.HasGpuDirtyBytes(address, size) ||
+                    (clean && (_bufferCache.HasGpuDirtyPages(address, size) || _imageCache.HasGpuModifiedImageBytes(address, size))))
+                {
+                    return false;
+                }
+
+                NoteCleanReadPage(address, size);
+            }
+
+            if (TryGetAliasPointer(address, size, out var alias))
+            {
+                new ReadOnlySpan<byte>(alias, destination.Length).CopyTo(destination);
+                return true;
+            }
+
+            return _guestMemory.TryRead(address, destination);
+        }
+
+        private const ulong CleanReadPageBytes = 0x1000;
+        private const int CleanReadPageSlots = 64;
+        private CleanReadPages? _cleanReadPages;
+        private bool _backingAliasAccess;
+
+        private sealed class CleanReadPages
+        {
+            public readonly ulong[] Tags = new ulong[CleanReadPageSlots];
+            public readonly long[] Versions = new long[CleanReadPageSlots];
+            public readonly ulong[] Aliases = new ulong[CleanReadPageSlots];
+            public readonly object?[] Snapshots = new object?[CleanReadPageSlots];
+        }
+
+        private bool TryGetAliasPointer(ulong address, ulong size, out byte* pointer)
+        {
+            pointer = null;
+            if (!_backingAliasAccess || _cleanReadPages is not { } pages ||
+                !TryGetCleanReadPage(address, size, out var page, out var slot) || pages.Tags[slot] != page + 1 ||
+                _guestBacking.BackingAliasSnapshot is not { } snapshot)
             {
                 return false;
             }
 
-            return _guestMemory.TryRead(address, destination);
+            if (pages.Aliases[slot] == 0 || !ReferenceEquals(pages.Snapshots[slot], snapshot))
+            {
+                if (!_guestBacking.TryResolveBackingAlias(page, CleanReadPageBytes, out var resolved) || resolved == 0)
+                {
+                    return false;
+                }
+
+                pages.Aliases[slot] = resolved;
+                pages.Snapshots[slot] = snapshot;
+            }
+
+            pointer = (byte*)(pages.Aliases[slot] + (address - page));
+            return true;
+        }
+
+        private static bool TryGetCleanReadPage(ulong address, ulong size, out ulong page, out int slot)
+        {
+            page = address & ~(CleanReadPageBytes - 1);
+            slot = (int)((page / CleanReadPageBytes) & (CleanReadPageSlots - 1));
+            return size != 0 && address + size > address && ((address + size - 1) & ~(CleanReadPageBytes - 1)) == page;
+        }
+
+        private bool IsCleanReadPage(ulong address, ulong size) =>
+            _cleanReadPages is { } pages &&
+            TryGetCleanReadPage(address, size, out var page, out var slot) &&
+            pages.Tags[slot] == page + 1 &&
+            pages.Versions[slot] == _bufferCache.GpuModifiedVersion;
+
+        private void NoteCleanReadPage(ulong address, ulong size)
+        {
+            if (!TryGetCleanReadPage(address, size, out var page, out var slot))
+            {
+                return;
+            }
+
+            var version = _bufferCache.GpuModifiedVersion;
+            if (!_guestMemory.CanRead(page, CleanReadPageBytes) || _bufferCache.HasGpuDirtyBytes(page, CleanReadPageBytes))
+            {
+                return;
+            }
+
+            var pages = _cleanReadPages ??= new CleanReadPages();
+            if (pages.Tags[slot] != page + 1)
+            {
+                pages.Tags[slot] = page + 1;
+                pages.Aliases[slot] = 0;
+                pages.Snapshots[slot] = null;
+            }
+
+            pages.Versions[slot] = version;
         }
 
         public ulong CreateShaderModule(IGuestCompiledShader shader, ShaderStage stage, ulong hash, ulong programId)
