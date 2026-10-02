@@ -1147,13 +1147,17 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferDirtySynchronization);
         var startedAt = BufferUploadProfile.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
-        // The locked query observes completed writes; a later write remains dirty for the next obtain.
-        if (!preserveCpuWriteHotPages && !isWritten && !isTexelBuffer && !_tracker.HasCpuDirtyPages(guestAddress, size))
+        if ((!preserveCpuWriteHotPages && !isWritten && !isTexelBuffer && !_tracker.MayHaveCpuDirtyPages(guestAddress, size)) ||
+            (isWritten && !isTexelBuffer && _gpuModifiedRanges.Contains(guestAddress, size)))
         {
             if (BufferUploadProfile.Enabled)
                 BufferUploadProfile.Record(guestAddress, size, 0, 0, 0, System.Diagnostics.Stopwatch.GetTimestamp() - startedAt);
             return false;
         }
+
+        profileScope.SwitchPhase(isWritten
+            ? RenderPhaseProfile.Phase.BufferDirtySyncWritten
+            : isTexelBuffer ? RenderPhaseProfile.Phase.BufferDirtySyncTexel : RenderPhaseProfile.Phase.BufferDirtySyncUpload);
         var copies = new List<BufferCopy>();
         var totalSize = 0UL;
         GpuBuffer? source = null;
