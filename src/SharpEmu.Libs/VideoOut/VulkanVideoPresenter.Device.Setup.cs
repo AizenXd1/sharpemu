@@ -1213,8 +1213,13 @@ internal static unsafe partial class VulkanVideoPresenter
             if (_pipelineCachePath is not null &&
                 useShards)
             {
+                var singleFilePath = _pipelineCachePath;
                 _pipelineCacheShardDirectory = _pipelineCachePath + ".shards";
                 _pipelineCachePath = Path.Combine(_pipelineCacheShardDirectory, "present.bin");
+                if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("SHARPEMU_VK_PIPELINE_CACHE_PATH")))
+                {
+                    RemoveSingleFilePipelineCache(singleFilePath);
+                }
             }
             byte[] initialData = [];
             try
@@ -1333,6 +1338,27 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             return cachePath;
+        }
+
+        private static void RemoveSingleFilePipelineCache(string path)
+        {
+            try
+            {
+                if (!File.Exists(path))
+                {
+                    return;
+                }
+
+                var bytes = new FileInfo(path).Length;
+                File.Delete(path);
+                Console.Error.WriteLine(
+                    $"[LOADER][INFO] Vulkan pipeline cache now keeps one file per shader; removed the single-file cache: path={path} bytes={bytes}");
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] Vulkan single-file pipeline cache removal failed: {exception.Message}");
+            }
         }
 
         private void MarkPipelineCacheDirty()
