@@ -33,4 +33,6 @@ public sealed class CpuDirtySummary
     }
 
     public bool IsDirty(ulong block) => (Volatile.Read(ref _words[block / WordBits]) & (1L << (int)(block % WordBits))) != 0;
+
+    public ulong Word(int index) => (ulong)Volatile.Read(ref _words[index]);
 }
