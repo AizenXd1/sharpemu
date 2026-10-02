@@ -638,6 +638,7 @@ public static partial class Gen5ShaderTranslator
         {
             0x03 => "SMovB32",
             0x04 => "SMovB64",
+            0x06 => "SCmovB64",
             0x07 => "SNotB32",
             0x08 => "SNotB64",
             0x09 => "SWqmB32",
@@ -2086,6 +2087,14 @@ public static partial class Gen5ShaderTranslator
             case Gen5ShaderEncoding.Sop1:
                 sources = [Gen5Operand.Source(word & 0xFF, literal)];
                 destinations = [Gen5Operand.Scalar((word >> 16) & 0x7F)];
+                if (opcode == "SCmovB64")
+                {
+                    // CMOV is CSELECT with the old destination as the false
+                    // source. Reuse its SCC, register-pair and EXEC handling.
+                    opcode = "SCselectB64";
+                    encoding = Gen5ShaderEncoding.Sop2;
+                    sources = [sources[0], destinations[0]];
+                }
                 break;
             case Gen5ShaderEncoding.Sop2:
                 sources =
