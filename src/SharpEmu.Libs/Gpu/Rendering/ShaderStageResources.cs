@@ -57,6 +57,7 @@ public class ShaderProgramInfo
     public uint? ConstantStoreValue { get; init; }
     public bool HasBitwiseExclusiveOr { get; init; }
     public Pipelines.ConstantFill? ConstantFill { get; init; }
+    public Pipelines.BoundedFill? BoundedFill { get; init; }
     public BufferResourceInfo[] Buffers { get; init; } = [];
     public ImageResourceInfo[] Images { get; init; } = [];
     public int SamplerCount { get; init; }

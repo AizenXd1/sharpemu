@@ -95,6 +95,12 @@ public sealed partial class RenderExecutor
             return;
         }
 
+        if (indirectArgumentsAddress == 0 && TryConsumeBoundedFill(input, groupsX, groupsY, groupsZ, dispatchInitiator))
+        {
+            _host.ResetBindings();
+            return;
+        }
+
         if (indirectArgumentsAddress == 0 && TryConsumeImageClear(input, groupsX, groupsY, groupsZ, dispatchInitiator))
         {
             _host.ResetBindings();
@@ -446,6 +452,184 @@ public sealed partial class RenderExecutor
         }
 
         return consumed;
+    }
+
+    private const uint Format32SInt = 21;
+    private const uint Format32Float = 22;
+    private const ulong DescriptorAddressMask = 0x0000_FFFF_FFFF_FFFFul;
+
+    private bool TryConsumeBoundedFill(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)
+    {
+        var program = input.Stage.Program!;
+        if (program.BoundedFill is not { } fill)
+        {
+            return false;
+        }
+
+        if (program.UserDataBase != 0 || fill.GroupScalarRegister != (uint)input.WorkgroupRegister || !input.GroupIdX || input.GroupIdY || input.GroupIdZ ||
+            input.ThreadIdCount < 1 || input.ThreadsX != ImageClearWaveSize || input.ThreadsY != 1 || input.ThreadsZ != 1 ||
+            groupsX == 0 || groupsY != 1 || groupsZ != 1)
+        {
+            return RefuseBoundedFill(program,
+                $"shape group=s{fill.GroupScalarRegister}/s{input.WorkgroupRegister} ids={input.GroupIdX}{input.GroupIdY}{input.GroupIdZ} tid={input.ThreadIdCount} " +
+                $"local={input.ThreadsX}x{input.ThreadsY}x{input.ThreadsZ} dispatch={groupsX}x{groupsY}x{groupsZ} base={program.UserDataBase}");
+        }
+
+        var userData = input.Stage.Resources.UserData;
+        Span<uint> destinationWords = stackalloc uint[4];
+        for (var word = 0; word < destinationWords.Length; word++)
+        {
+            if (!TryResolveFillWord(fill.Destination[word], userData, out destinationWords[word]))
+            {
+                return RefuseBoundedFill(program, $"destination word {word} unreadable");
+            }
+        }
+
+        var destination = BufferDescriptorWords.From(destinationWords);
+        uint start = 0;
+        uint value;
+        if (!TryResolveFillWord(fill.Count, userData, out var count) ||
+            (fill.Start is { } startWord && !TryResolveFillWord(startWord, userData, out start)))
+        {
+            return RefuseBoundedFill(program, "range unreadable");
+        }
+
+        if (fill.ConstantValue is { } constant)
+        {
+            value = constant;
+        }
+        else if (fill.Value is not { } valueWord || !TryResolveFillWord(valueWord, userData, out value))
+        {
+            return RefuseBoundedFill(program, "value unreadable");
+        }
+
+        if (fill.PatternLength is { } lengthWord)
+        {
+            if (fill.Pattern is not { } pattern || !TryResolveFillWord(lengthWord, userData, out var length) || length == 0 || length > pattern.Length)
+            {
+                return RefuseBoundedFill(program, "pattern length");
+            }
+
+            for (var word = 1; word < length; word++)
+            {
+                if (!TryResolveFillWord(pattern[word], userData, out var repeated) || repeated != value)
+                {
+                    return RefuseBoundedFill(program, $"pattern length={length} varies");
+                }
+            }
+        }
+
+        if (destination.Stride != sizeof(uint) || destination.SwizzleEnabled || destination.AddThreadId || destination.OutOfBounds != 0 ||
+            destination.Type != 0 || (destination.Address & 3) != 0 ||
+            (fill.Formatted && destination.Format is not (Format32UInt or Format32SInt or Format32Float)))
+        {
+            return RefuseBoundedFill(program,
+                $"descriptor stride={destination.Stride} swizzle={destination.SwizzleEnabled} tid={destination.AddThreadId} oob={destination.OutOfBounds} " +
+                $"type={destination.Type} format={destination.Format} address=0x{destination.Address:X}");
+        }
+
+        var threads = (dispatchInitiator & DispatchInitiatorUseThreadDimensions) != 0 ? groupsX : (ulong)groupsX * input.ThreadsX;
+        var written = Math.Min(count, threads);
+        if (threads > uint.MaxValue || (ulong)start + written > uint.MaxValue)
+        {
+            return RefuseBoundedFill(program, $"overflow threads={threads} start={start} count={count}");
+        }
+
+        var end = Math.Min((ulong)start + written, destination.RecordCount);
+        if (end <= start)
+        {
+            return false;
+        }
+
+        var address = destination.Address + (ulong)start * sizeof(uint);
+        var size = (end - start) * sizeof(uint);
+        var consumed = _host.TryFillDccMetadata(address, size, value);
+        if (RenderTrace.Enabled && RenderTrace.MetadataClear())
+        {
+            RenderTrace.Write($"Bounded fill: shader=0x{program.Hash:X16} address=0x{address:X16} size=0x{size:X} value=0x{value:X8} consumed={consumed}");
+        }
+
+        return consumed;
+    }
+
+    private static bool RefuseBoundedFill(ShaderProgramInfo program, string reason)
+    {
+        Diagnostics.DccWriterTrace.Refuse(program.Hash, reason);
+        return false;
+    }
+
+    private bool TryResolveFillWord(Pipelines.FillWord word, ReadOnlySpan<uint> userData, out uint value)
+    {
+        value = 0;
+        switch (word.Source)
+        {
+            case Pipelines.FillWordSource.UserData:
+                if (word.Register >= userData.Length)
+                {
+                    return false;
+                }
+
+                value = userData[(int)word.Register];
+                return true;
+            case Pipelines.FillWordSource.BufferResource:
+            {
+                if (word.Register + 4 > userData.Length)
+                {
+                    return false;
+                }
+
+                var resource = BufferDescriptorWords.From(userData.Slice((int)word.Register, 4));
+                var size = resource.Stride == 0 ? resource.RecordCount : (ulong)resource.Stride * resource.RecordCount;
+                var offset = (ulong)word.Offset & ~3ul;
+                if (offset > size || size - offset < sizeof(uint))
+                {
+                    return true;
+                }
+
+                return TryReadFillWord((resource.Address & ~3ul) + offset, out value);
+            }
+            case Pipelines.FillWordSource.Pointer:
+                return TryReadPointer(word.Register, userData, out var pointer) && TryReadFillWord(pointer + (ulong)word.Offset, out value);
+            case Pipelines.FillWordSource.IndirectPointer:
+            {
+                if (!TryReadPointer(word.Register, userData, out var outer) ||
+                    !TryReadFillWord(outer + (ulong)word.PointerOffset, out var low) ||
+                    !TryReadFillWord(outer + (ulong)word.PointerOffset + sizeof(uint), out var high))
+                {
+                    return false;
+                }
+
+                var inner = ((low | ((ulong)high << 32)) & DescriptorAddressMask) & ~3ul;
+                return TryReadFillWord(inner + (ulong)word.Offset, out value);
+            }
+            default:
+                return false;
+        }
+    }
+
+    private static bool TryReadPointer(uint register, ReadOnlySpan<uint> userData, out ulong pointer)
+    {
+        pointer = 0;
+        if (register + 2 > userData.Length)
+        {
+            return false;
+        }
+
+        pointer = ((userData[(int)register] | ((ulong)userData[(int)register + 1] << 32)) & DescriptorAddressMask) & ~3ul;
+        return pointer != 0;
+    }
+
+    private bool TryReadFillWord(ulong address, out uint value)
+    {
+        value = 0;
+        Span<byte> bytes = stackalloc byte[sizeof(uint)];
+        if (address == 0 || !_host.TryReadGuest(address, bytes))
+        {
+            return false;
+        }
+
+        value = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+        return true;
     }
 
     private bool TryConsumeImageClear(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)

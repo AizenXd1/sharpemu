@@ -86,6 +86,7 @@ internal sealed class ProgramSourceEntry
     public required Gen5ShaderProgram Program { get; init; }
     public required bool HasBitwiseExclusiveOr { get; init; }
     public ConstantFill? ConstantFill { get; init; }
+    public BoundedFill? BoundedFill { get; init; }
     public EmbeddedVertexFetchPlan? EmbeddedFetch { get; init; }
     public ShaderVertexInput[] VertexInputs { get; init; } = [];
     public List<ProgramPermutation> Permutations { get; } = new(8);
@@ -344,6 +345,7 @@ internal sealed class ShaderProgramCache
             Program = program,
             HasBitwiseExclusiveOr = exclusiveOr,
             ConstantFill = source.Stage == ShaderStage.Compute ? ConstantFillDetector.Detect(program) : null,
+            BoundedFill = source.Stage == ShaderStage.Compute ? BoundedFillDetector.Detect(program) : null,
             EmbeddedFetch = fetch,
             VertexInputs = vertexInputs,
         };
@@ -744,6 +746,7 @@ internal sealed class ShaderProgramCache
             ConstantStoreValue = FindConstantStoreValue(entry.Program),
             HasBitwiseExclusiveOr = entry.HasBitwiseExclusiveOr,
             ConstantFill = entry.ConstantFill,
+            BoundedFill = entry.BoundedFill,
             Buffers = buffers,
             Images = images,
             SamplerCount = info.Samplers.Count,
