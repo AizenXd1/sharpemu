@@ -1143,5 +1143,16 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         public bool TryAbsorbDccFill(ulong address, ulong size, uint fillValue) => _imageCache.TryAbsorbDccFill(address, size, fillValue);
+
+        public bool TryFillDccMetadata(ulong address, ulong size, uint fillValue)
+        {
+            if (!_imageCache.OverlapsDccMetadata(address, size))
+            {
+                return false;
+            }
+
+            _bufferCache.FillDccMetadata(address, size, fillValue);
+            return true;
+        }
     }
 }

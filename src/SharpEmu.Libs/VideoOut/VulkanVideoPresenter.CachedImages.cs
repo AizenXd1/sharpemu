@@ -350,7 +350,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             foreach (var slice in slices)
             {
-                _bufferCache.FillBuffer(slice, sliceSize, uint.MaxValue, false);
+                _bufferCache.FillDccMetadata(slice, sliceSize, uint.MaxValue);
             }
 
             if (RenderTrace.Enabled && RenderTrace.MetadataClear())
@@ -375,7 +375,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 if (_imageCache.TryReadGuestDccClear(description.Metadata.Range.Address, sliceSize, baseLayer + layer, out var slice, out _))
                 {
-                    _bufferCache.FillBuffer(slice, sliceSize, uint.MaxValue, false);
+                    _bufferCache.FillDccMetadata(slice, sliceSize, uint.MaxValue);
                 }
             }
         }

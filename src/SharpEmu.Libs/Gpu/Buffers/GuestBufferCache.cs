@@ -412,6 +412,54 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         var bufferIdentifier = FindBuffer(guestAddress, size);
         var (destination, destinationOffset) = ObtainBuffer(guestAddress, size, true, true, bufferIdentifier);
         destination.Fill(destinationOffset, size, value);
+        if (images.OverlapsDccMetadata(guestAddress, size) && TryWriteFillToBacking(guestAddress, size, value))
+        {
+            _gpuModifiedRanges.Remove(guestAddress, size);
+            var firstPage = guestAddress & ~(TrackerLayout.PageBytes - 1);
+            for (var page = firstPage; page < guestAddress + size; page += TrackerLayout.PageBytes)
+            {
+                if (!_gpuModifiedRanges.Overlaps(page, TrackerLayout.PageBytes))
+                {
+                    _tracker.ClearGpuDirtyPages(page, TrackerLayout.PageBytes);
+                }
+            }
+        }
+    }
+
+    public void FillDccMetadata(ulong guestAddress, ulong size, uint value)
+    {
+        if (guestAddress == 0 || (guestAddress & 3) != 0 || size == 0 || (size & 3) != 0 || size > ulong.MaxValue - guestAddress ||
+            HasGpuDirtyBytes(guestAddress, size) || RequireImageCache().QueryRegion(guestAddress, size).ImageBytes)
+        {
+            FillBuffer(guestAddress, size, value, false);
+            return;
+        }
+
+        var (destination, destinationOffset) = ObtainBuffer(guestAddress, size, false, false, FindBuffer(guestAddress, size));
+        destination.Fill(destinationOffset, size, value);
+        if (!TryWriteFillToBacking(guestAddress, size, value))
+        {
+            FillBuffer(guestAddress, size, value, false);
+        }
+    }
+
+    private bool TryWriteFillToBacking(ulong guestAddress, ulong size, uint value)
+    {
+        var values = new uint[(int)Math.Min(size / sizeof(uint), 4096)];
+        Array.Fill(values, value);
+        var bytes = MemoryMarshal.AsBytes<uint>(values);
+        for (ulong offset = 0; offset < size;)
+        {
+            var chunk = (int)Math.Min(size - offset, (ulong)bytes.Length);
+            if (!_backing.TryWriteBacking(guestAddress + offset, bytes[..chunk]))
+            {
+                return false;
+            }
+
+            offset += (ulong)chunk;
+        }
+
+        return true;
     }
 
     public void CopyBuffer(ulong dstVaddr, ulong srcVaddr, ulong size, bool dstGds, bool srcGds)

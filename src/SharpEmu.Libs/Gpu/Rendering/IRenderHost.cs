@@ -186,5 +186,7 @@ public interface IRenderHost
 
     bool TryAbsorbDccFill(ulong address, ulong size, uint fillValue);
 
+    bool TryFillDccMetadata(ulong address, ulong size, uint fillValue);
+
     Exception Fatal(string message);
 }
