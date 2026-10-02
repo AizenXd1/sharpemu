@@ -43,6 +43,46 @@ public sealed class VulkanPipelineCacheShardTests(HeadlessVulkanFixture fixture)
     }
 
     [Fact]
+    public void AnUnchangedShardIsNotWrittenAgain()
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan)) return;
+        var directory = Path.Combine(Path.GetTempPath(), "SharpEmuTests", Guid.NewGuid().ToString("N"));
+        using var presenter = new PresenterUnderTest(vulkan);
+        presenter.SetField("_pipelineCacheShardDirectory", directory);
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory, "test.bin");
+            _ = ((Lazy<PipelineCache>)presenter.InvokeMethod("GetGuestPipelineCacheSource", "test")!).Value;
+            presenter.InvokeMethod("SaveGuestPipelineCaches");
+            Assert.True(File.Exists(path));
+
+            File.Delete(path);
+            presenter.InvokeMethod("GetGuestPipelineCacheSource", "test");
+            presenter.InvokeMethod("SaveGuestPipelineCaches");
+            Assert.False(File.Exists(path));
+
+            presenter.InvokeMethod("SaveGuestPipelineCaches");
+            presenter.InvokeMethod("DestroyGuestPipelineCaches");
+            _ = ((Lazy<PipelineCache>)presenter.InvokeMethod("GetGuestPipelineCacheSource", "test")!).Value;
+            presenter.InvokeMethod("SaveGuestPipelineCaches");
+            Assert.True(File.Exists(path));
+
+            presenter.InvokeMethod("DestroyGuestPipelineCaches");
+            _ = ((Lazy<PipelineCache>)presenter.InvokeMethod("GetGuestPipelineCacheSource", "test")!).Value;
+            File.Delete(path);
+            presenter.InvokeMethod("SaveGuestPipelineCaches");
+            Assert.False(File.Exists(path));
+        }
+        finally
+        {
+            presenter.InvokeMethod("DestroyGuestPipelineCaches");
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void ACheckpointWritesNewShardsAndWaitsForTheNextInterval()
     {
         var vulkan = fixture.Vulkan;

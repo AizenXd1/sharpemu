@@ -13,10 +13,13 @@ internal static unsafe partial class VulkanVideoPresenter
     {
         private sealed class DriverCacheShard
         {
-            public required Lazy<PipelineCache> Cache;
+            public Lazy<PipelineCache> Cache = null!;
             public required string Path;
             public bool Dirty;
+            public nuint SavedBytes;
         }
+
+        private const double SlowShardLoadMilliseconds = 50;
 
         private string? _pipelineCacheShardDirectory;
         private readonly Dictionary<string, DriverCacheShard> _pipelineCacheShards = new();
@@ -54,10 +57,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 return existing.Cache;
             }
 
-            var path = Path.Combine(_pipelineCacheShardDirectory, key + ".bin");
-            var source = new Lazy<PipelineCache>(() => LoadGuestPipelineCache(key, path));
-            _pipelineCacheShards.Add(key, new DriverCacheShard { Cache = source, Path = path, Dirty = true });
-            return source;
+            var shard = new DriverCacheShard { Path = Path.Combine(_pipelineCacheShardDirectory, key + ".bin"), Dirty = true };
+            shard.Cache = new Lazy<PipelineCache>(() => LoadGuestPipelineCache(key, shard));
+            _pipelineCacheShards.Add(key, shard);
+            return shard.Cache;
         }
 
         private PipelineCache ResolveGuestPipelineCache(Lazy<PipelineCache>? source)
@@ -66,8 +69,9 @@ internal static unsafe partial class VulkanVideoPresenter
             return cache.Handle != 0 ? cache : _pipelineCache;
         }
 
-        private PipelineCache LoadGuestPipelineCache(string key, string path)
+        private PipelineCache LoadGuestPipelineCache(string key, DriverCacheShard shard)
         {
+            var path = shard.Path;
             byte[] data = [];
             try
             {
@@ -90,19 +94,45 @@ internal static unsafe partial class VulkanVideoPresenter
                 return default;
             }
 
-            if (data.Length != 0)
-                Console.Error.WriteLine($"[LOADER][INFO] Vulkan cache shard loaded: key={key} bytes={data.Length} ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F1}");
+            if (data.Length == 0)
+                return cache;
+
+            var milliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+            if (QueryPipelineCacheSize(cache) is { } size)
+                shard.SavedBytes = size;
+            if (milliseconds >= SlowShardLoadMilliseconds)
+                Console.Error.WriteLine($"[LOADER][INFO] Vulkan cache shard loaded: key={key} bytes={data.Length} ms={milliseconds:F1}");
             return cache;
         }
 
         private void SaveGuestPipelineCaches()
         {
+            var savedShards = 0;
+            nuint savedBytes = 0;
             foreach (var shard in _pipelineCacheShards.Values)
             {
-                if (shard.Dirty && shard.Cache.IsValueCreated && shard.Cache.Value.Handle != 0 &&
-                    SaveDriverPipelineCache(shard.Cache.Value, shard.Path, MaxPipelineCacheBytes, out _))
+                if (!shard.Dirty || !shard.Cache.IsValueCreated || shard.Cache.Value.Handle == 0)
+                    continue;
+
+                var cache = shard.Cache.Value;
+                if (QueryPipelineCacheSize(cache) is { } size && size == shard.SavedBytes)
+                {
                     shard.Dirty = false;
+                    continue;
+                }
+
+                if (SaveDriverPipelineCache(cache, shard.Path, MaxPipelineCacheBytes, out var bytes))
+                {
+                    shard.Dirty = false;
+                    shard.SavedBytes = bytes;
+                    savedShards++;
+                    savedBytes += bytes;
+                }
             }
+
+            if (savedShards != 0)
+                Console.Error.WriteLine(
+                    $"[LOADER][INFO] Vulkan cache shards saved: directory={_pipelineCacheShardDirectory} shards={savedShards} bytes={savedBytes}");
         }
 
         private void DestroyGuestPipelineCaches()
