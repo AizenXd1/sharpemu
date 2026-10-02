@@ -282,7 +282,13 @@ internal static unsafe partial class VulkanVideoPresenter
             SetDebugName(ObjectType.ShaderModule, module.Handle, $"SharpEmu {stage} 0x{hash:X16}");
             _shaderModules.Add(programId, module);
             _shaderModuleSpirvBytes[module.Handle] = shader.Payload.Length;
-            _shaderModuleCacheIdentities[module.Handle] = VulkanPipelineCacheStorage.CompiledShaderIdentity(shader.Payload);
+            var identity = VulkanPipelineCacheStorage.CompiledShaderIdentity(shader.Payload);
+            _shaderModuleCacheIdentities[module.Handle] = identity;
+            if (stage == ShaderStage.Compute)
+            {
+                NoteRuntimeComputeModule(identity);
+            }
+
             return module.Handle;
         }
 
@@ -478,9 +484,14 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         // One layout binding per descriptor binding of the stage, at the stage's native binding numbers.
-        private static void CollectLayoutBindings(List<DescriptorSetLayoutBinding> bindings, ShaderProgramInfo program, ShaderStage stage)
+        private static void CollectLayoutBindings(List<DescriptorSetLayoutBinding> bindings, ShaderProgramInfo program, ShaderStage stage) =>
+            CollectLayoutBindings(
+                bindings,
+                program.Bindings ?? throw SubmissionScheduler.Fatal($"The program has no binding layout: hash=0x{program.Hash:X16}."),
+                stage);
+
+        private static void CollectLayoutBindings(List<DescriptorSetLayoutBinding> bindings, BindingLayout layout, ShaderStage stage)
         {
-            var layout = program.Bindings ?? throw SubmissionScheduler.Fatal($"The program has no binding layout: hash=0x{program.Hash:X16}.");
             foreach (var binding in layout.Descriptors)
             {
                 bindings.Add(new DescriptorSetLayoutBinding

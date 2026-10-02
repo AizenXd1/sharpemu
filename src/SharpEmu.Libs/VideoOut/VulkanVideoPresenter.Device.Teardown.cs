@@ -26,6 +26,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 _vk.DeviceWaitIdle(_device);
             }
 
+            StopShaderPrewarm();
             DrainPendingComputePipelines();
             SavePipelineCache(force: true);
             DrainFrameSlots();

@@ -92,6 +92,7 @@ internal static unsafe partial class VulkanVideoPresenter
             AttachGuestGpuMemory();
             Console.Error.WriteLine(
                 $"[LOADER][INFO] Vulkan VideoOut ready: {_extent.Width}x{_extent.Height}, format={_swapchainFormat}");
+            StartShaderPrewarm();
         }
 
         private static void WaitForRenderDocAttachIfRequested()
