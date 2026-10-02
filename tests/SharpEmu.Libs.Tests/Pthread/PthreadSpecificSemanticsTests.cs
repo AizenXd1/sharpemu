@@ -112,23 +112,31 @@ public sealed class PthreadSpecificSemanticsTests
         var key = CreateKey(context, MemoryBase + 0x4_0100);
         Assert.Equal(0, Setspecific(context, key, 0x1111UL));
 
-        // Blocking wait, not await: pthread-specific storage is keyed by the
-        // calling thread, and an await continuation can resume on a different
-        // pool thread, which would change what "this thread" means mid-test.
-        var other = Task.Factory.StartNew(
-            () =>
+        ulong seen = 0;
+        ulong mine = 0;
+        var setResult = -1;
+        Exception? failure = null;
+        var other = new Thread(() =>
+        {
+            try
             {
                 var otherContext = new CpuContext(memory, Generation.Gen5);
-                var seen = Getspecific(otherContext, key);
-                Assert.Equal(0, Setspecific(otherContext, key, 0x2222UL));
-                return (seen, mine: Getspecific(otherContext, key));
-            },
-            CancellationToken.None,
-            TaskCreationOptions.LongRunning,
-            TaskScheduler.Default).GetAwaiter().GetResult();
+                seen = Getspecific(otherContext, key);
+                setResult = Setspecific(otherContext, key, 0x2222UL);
+                mine = Getspecific(otherContext, key);
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+        });
+        other.Start();
+        other.Join();
 
-        Assert.Equal(0UL, other.seen);
-        Assert.Equal(0x2222UL, other.mine);
+        Assert.Null(failure);
+        Assert.Equal(0UL, seen);
+        Assert.Equal(0, setResult);
+        Assert.Equal(0x2222UL, mine);
         Assert.Equal(0x1111UL, Getspecific(context, key));
     }
 }
