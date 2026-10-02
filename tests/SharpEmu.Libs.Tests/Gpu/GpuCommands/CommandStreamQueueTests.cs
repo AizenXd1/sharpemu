@@ -356,7 +356,8 @@ public sealed class CommandStreamQueueTests
     [Fact]
     public async Task Done_QueuesTheBoundaryAndOnlyWaitsForASecondOne()
     {
-        var (host, queue) = NewQueue();
+        var host = new RecordingCommandStreamHost();
+        var queue = new CommandStreamQueue(host, boundariesInFlight: 1);
         Enqueue(host, queue, Graphics, 1, CreateInstanceCountPacket(1));
 
         // The first suspend point returns without draining the accepted submissions.
@@ -381,4 +382,49 @@ public sealed class CommandStreamQueueTests
         Assert.Equal(2UL, queue.GetInterpreter(0).SubmitId);
     }
 
+    [Fact]
+    public async Task Done_WaitsForItsOwnBoundaryWithoutRunAhead()
+    {
+        var host = new RecordingCommandStreamHost();
+        var queue = new CommandStreamQueue(host, boundariesInFlight: 0);
+        Enqueue(host, queue, Graphics, 1, CreateInstanceCountPacket(1));
+
+        var done = Task.Run(queue.Done);
+        await Task.WhenAny(done, Task.Delay(100));
+        Assert.False(done.IsCompleted);
+
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        await Task.WhenAny(done, Task.Delay(100));
+        Assert.False(done.IsCompleted);
+
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal(IdleOutcome.Completed, await done.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(1, queue.FrameNumber);
+        Assert.False(queue.HasPending);
+    }
+
+    [Fact]
+    public async Task Done_KeepsALabelRewrittenAfterItAwayFromAnUnfinishedFrame()
+    {
+        var host = new RecordingCommandStreamHost();
+        var queue = new CommandStreamQueue(host, boundariesInFlight: 0);
+        void WriteLabel(uint value) => Assert.True(host.GuestMemory.TryWrite(StreamRunner.DataAddress, BitConverter.GetBytes(value)));
+        WriteLabel(0);
+        Enqueue(host, queue, Graphics, 1,
+            StreamRunner.Packet(PacketOpcode.WriteData, 0x00000500u, StreamRunner.Low(StreamRunner.DataAddress), StreamRunner.High(StreamRunner.DataAddress), 1),
+            WaitEqual(StreamRunner.DataAddress, 1));
+
+        var guest = Task.Run(() =>
+        {
+            var outcome = queue.Done();
+            WriteLabel(0);
+            return outcome;
+        });
+
+        await Task.WhenAny(guest, Task.Delay(100));
+        Assert.False(guest.IsCompleted);
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal(IdleOutcome.Completed, await guest.WaitAsync(TimeSpan.FromSeconds(2)));
+    }
 }

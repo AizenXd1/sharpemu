@@ -29,8 +29,9 @@ public sealed class CommandStreamQueue
     public const int ComputeQueueCount = 56;
     public const int QueueCount = 1 + ComputeQueueCount;
     public const int AllBlockedRetryMilliseconds = 100;
-    // The hardware lets one suspend point be in flight; a second one waits for the first.
-    public const int MaxBoundariesInFlight = 1;
+    // One boundary may run ahead; explicit zero keeps the synchronous diagnostic mode.
+    public static readonly int DefaultBoundariesInFlight =
+        Environment.GetEnvironmentVariable("SHARPEMU_SUSPEND_POINTS_IN_FLIGHT") == "0" ? 0 : 1;
 
     private readonly ICommandStreamHost _host;
     private readonly object _gate = new();
@@ -49,9 +50,16 @@ public sealed class CommandStreamQueue
     private IdleOutcome _outcome = IdleOutcome.Completed;
     private Thread? _processingThread;
 
-    public CommandStreamQueue(ICommandStreamHost host)
+    private readonly int _boundariesInFlight;
+
+    public CommandStreamQueue(ICommandStreamHost host) : this(host, DefaultBoundariesInFlight)
+    {
+    }
+
+    public CommandStreamQueue(ICommandStreamHost host, int boundariesInFlight)
     {
         _host = host;
+        _boundariesInFlight = Math.Max(0, boundariesInFlight);
         for (var index = 0; index < QueueCount; index++)
         {
             _queues[index] = new LinkedList<CommandSubmission>();
@@ -200,9 +208,6 @@ public sealed class CommandStreamQueue
         Monitor.PulseAll(_gate);
     }
 
-    // Marks the frame boundary. A suspend point inserts commands that drain the graphics
-    // pipe; it does not wait for them, and the hardware allows one to be in flight, so the
-    // boundary is queued behind the submissions it ends and only a second one waits.
     public IdleOutcome Done()
     {
         if (_processingThread == Thread.CurrentThread)
@@ -238,7 +243,7 @@ public sealed class CommandStreamQueue
 
             _pendingBoundaries++;
             EnqueueLocked(new CommandSubmission(CommandSubmissionKind.FrameBoundary, 0, 0, 0, 0, null));
-            while (_outcome == IdleOutcome.Completed && _pendingBoundaries > MaxBoundariesInFlight)
+            while (_outcome == IdleOutcome.Completed && _pendingBoundaries > _boundariesInFlight)
             {
                 Monitor.Wait(_gate);
             }
