@@ -526,8 +526,14 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 _bdaTouchMapping = mapping;
             }
 
-            foreach (var span in spans)
-                _tracker.ForEachPossiblyCpuDirtyRange(span.Address, span.Size, _uploadDirtyBuffersInRange ??= UploadDirtyBuffersInRange);
+            var epoch = _tracker.CpuDirtyEpoch;
+            if (epoch != _bdaSweepEpoch || mapping != _bdaSweepMapping)
+            {
+                foreach (var span in spans)
+                    _tracker.ForEachPossiblyCpuDirtyRange(span.Address, span.Size, _uploadDirtyBuffersInRange ??= UploadDirtyBuffersInRange);
+                _bdaSweepEpoch = epoch;
+                _bdaSweepMapping = mapping;
+            }
         }
 
         if (traceAddress != 0)
@@ -537,6 +543,8 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     }
 
     private Action<ulong, ulong>? _uploadDirtyBuffersInRange;
+    private long _bdaSweepEpoch = -1;
+    private ulong _bdaSweepMapping;
 
     private void TouchBuffersInRange(ulong guestAddress, ulong size)
     {
@@ -556,7 +564,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             var buffer = _registry.GetBuffer(_registry.GetRegisteredIdentifier(index));
             var start = Math.Max(buffer.CpuAddress, guestAddress);
             var finish = Math.Min(buffer.CpuAddress + buffer.Size, end);
-            if (start < finish && _tracker.HasCpuDirtyPages(start, finish - start))
+            if (start < finish && _tracker.MayHaveCpuDirtyPages(start, finish - start))
                 _ = SynchronizeBuffer(buffer, start, finish - start, false, false, preserveCpuWriteHotPages: false);
         }
     }
