@@ -204,6 +204,13 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
 
     public bool TryWaitTimeline(ulong tick, out string failure)
     {
+        var target = tick;
+        if (GpuWaitSpin.TrySpin(() => ReadTimeline() >= target))
+        {
+            failure = Result.Success.ToString();
+            return true;
+        }
+
         var semaphore = _timeline;
         var waitInfo = new SemaphoreWaitInfo
         {
