@@ -47,6 +47,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     private readonly GpuBuffer _bdaPageTable;
     private readonly GuestBufferRegistry<GpuBuffer> _registry = new(CachingPageSize, PageOwnerTable.AddressSpaceSize);
     private readonly SpanSet _gpuModifiedRanges = new();
+    private long _gpuModifiedVersion;
     private readonly GuestPageTracker _tracker;
     private readonly GpuRingBuffer _staging;
     private readonly GpuRingBuffer _stream;
@@ -240,7 +241,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         if (isWritten)
         {
             buffer.NoteGpuWrite();
-            _gpuModifiedRanges.Add(guestAddress, size);
+            if (!_gpuModifiedRanges.Contains(guestAddress, size))
+            {
+                _gpuModifiedRanges.Add(guestAddress, size);
+                Interlocked.Increment(ref _gpuModifiedVersion);
+            }
         }
 
         return (buffer, buffer.Offset(guestAddress));
@@ -484,6 +489,8 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     public bool HasGpuDirtyPages(ulong guestAddress, ulong size) => _tracker.HasGpuDirtyPages(guestAddress, size);
 
     public bool HasGpuDirtyBytes(ulong guestAddress, ulong size) => _gpuModifiedRanges.Overlaps(guestAddress, size);
+
+    public long GpuModifiedVersion => Volatile.Read(ref _gpuModifiedVersion);
 
     public bool HasCpuDirtyPages(ulong guestAddress, ulong size) => _tracker.HasCpuDirtyPages(guestAddress, size);
 
