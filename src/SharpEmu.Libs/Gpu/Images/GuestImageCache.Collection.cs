@@ -193,12 +193,14 @@ public sealed partial class GuestImageCache
     internal void AddPageOwner(ulong address, ResourceSlotIdentifier imageIdentifier)
     {
         using var held = _lock.Hold();
+        InvalidateLookups();
         _pageOwners.GetOrCreate(address >> ImagePageOwnerTable.PageBits).Add(imageIdentifier);
     }
 
     internal bool RemovePageOwner(ulong address, ResourceSlotIdentifier imageIdentifier)
     {
         using var held = _lock.Hold();
+        InvalidateLookups();
         return _pageOwners.Find(address >> ImagePageOwnerTable.PageBits)?.Remove(imageIdentifier) == true;
     }
 

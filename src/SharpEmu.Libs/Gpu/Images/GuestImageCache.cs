@@ -124,6 +124,13 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         }
 
         using var held = _lock.Hold();
+        if (TryReuseLookup(ref request, exactFormat, out var reused))
+        {
+            return reused;
+        }
+
+        var original = request;
+        var generation = _lookupGeneration;
         var result = ResourceSlotIdentifier.Invalid;
         var candidates = FindImagesInRange(request.Description.Data.Address, request.Description.Data.Size, pageOverlap: false);
         foreach (var imageIdentifier in candidates)
@@ -134,6 +141,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             }
         }
 
+        var sameBacking = result.IsValid;
         var viewMip = -1;
         var viewLayer = -1;
         if (!result.IsValid)
@@ -220,6 +228,11 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
 
         image.LastAccessTick = _scheduler.CurrentTick;
         TouchImage(image);
+        if (sameBacking && generation == _lookupGeneration)
+        {
+            RememberLookup(original, exactFormat, request.View, result);
+        }
+
         return result;
     }
 
