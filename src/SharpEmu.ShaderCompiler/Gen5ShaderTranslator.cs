@@ -46,6 +46,18 @@ public static partial class Gen5ShaderTranslator
         ulong ContinuationAddress,
         ulong ContinuationHeaderAddress);
 
+    private static FusedProgramRegistry GetFusedPrograms(ICpuMemory memory)
+    {
+        // Each native guest thread has its own tracking wrapper, but all
+        // shader creation and render contexts share the underlying memory.
+        while (memory is ICpuMemoryWrapper wrapper)
+        {
+            memory = wrapper.Inner;
+        }
+
+        return _fusedProgramsByMemory.GetValue(memory, static _ => new FusedProgramRegistry());
+    }
+
     /// <summary>
     /// Records the two code objects that AGC joins into one hardware shader.
     /// The entry code transfers control to the continuation with S_SETPC_B64.
@@ -65,7 +77,7 @@ public static partial class Gen5ShaderTranslator
             return;
         }
 
-        var registry = _fusedProgramsByMemory.GetValue(ctx.Memory, static _ => new FusedProgramRegistry());
+        var registry = GetFusedPrograms(ctx.Memory);
         registry.Set(entryAddress, new FusedShaderParts(
             entryHeaderAddress,
             continuationAddress,
@@ -79,7 +91,7 @@ public static partial class Gen5ShaderTranslator
         out ulong continuationAddress,
         out ulong continuationHeaderAddress)
     {
-        var registry = _fusedProgramsByMemory.GetValue(ctx.Memory, static _ => new FusedProgramRegistry());
+        var registry = GetFusedPrograms(ctx.Memory);
         registry.TryGet(entryAddress, out var parts);
         continuationAddress = parts?.ContinuationAddress ?? 0;
         continuationHeaderAddress = parts?.ContinuationHeaderAddress ?? 0;
@@ -112,7 +124,7 @@ public static partial class Gen5ShaderTranslator
         out string error)
     {
         ValidateDppControlVectors();
-        var registry = _fusedProgramsByMemory.GetValue(ctx.Memory, static _ => new FusedProgramRegistry());
+        var registry = GetFusedPrograms(ctx.Memory);
         registry.TryGet(address, out var fusedParts);
         if (fusedParts is not null)
         {
