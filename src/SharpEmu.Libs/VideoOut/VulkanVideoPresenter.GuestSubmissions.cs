@@ -68,7 +68,9 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             using var profile = RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.QueueSubmit);
-            return _scheduler.Flush();
+            var tick = _scheduler.Flush();
+            _bufferCache?.OnBatchSubmitted();
+            return tick;
         }
 
         private void PrepareGuestSubmission(SubmitBundle bundle)
