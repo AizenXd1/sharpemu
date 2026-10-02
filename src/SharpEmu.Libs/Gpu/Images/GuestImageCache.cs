@@ -321,7 +321,8 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             var address = request.Description.Metadata.Range.Address;
             if (!_surfaceMetadata.TryGetValue(address, out var metadata))
             {
-                _surfaceMetadata.Add(address, new SurfaceMetadata { Kind = SurfaceMetadataKind.Dcc });
+                metadata = new SurfaceMetadata { Kind = SurfaceMetadataKind.Dcc };
+                _surfaceMetadata.Add(address, metadata);
             }
             else if (metadata.Kind == SurfaceMetadataKind.PendingDcc)
             {
@@ -331,6 +332,8 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             {
                 throw SubmissionScheduler.Fatal($"A color target reuses metadata that is not DCC: address=0x{address:X16} kind={metadata.Kind}.");
             }
+
+            metadata.Size = Math.Max(metadata.Size, request.Description.DccSliceSize * request.Description.TransferLayers);
         }
 
         TakeGpuOwnership(image);

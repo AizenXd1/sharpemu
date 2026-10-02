@@ -257,6 +257,12 @@ public sealed partial class GuestImageCache
         metadata.ClearMask = 0;
     }
 
+    internal void RegisterDccMetadataForTest(ulong address, ulong size)
+    {
+        using var held = _lock.Hold();
+        _surfaceMetadata[address] = new SurfaceMetadata { Kind = SurfaceMetadataKind.Dcc, Size = size };
+    }
+
     internal RegionLockScope HoldLockForTest() => new(_lock);
 
     internal readonly struct RegionLockScope : IDisposable
