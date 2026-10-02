@@ -221,6 +221,12 @@ internal sealed class ShaderProgramCache
         var snapshot = new ResourceSnapshot();
         var specialization = new ResourceSpecialization();
         var captureIndirectImageFailure = _spirvDumpEnabled ? ShaderPermutationDump.CreateFailureCapture(source) : null;
+        if (Diagnostics.GpuReadTrace.Enabled)
+        {
+            Diagnostics.GpuReadTrace.CurrentShader = source.Hash;
+            Diagnostics.GpuReadTrace.CurrentStage = source.Label;
+        }
+
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceMaterialization))
         {
             // Failure capture needs the full walk, so a dump run bypasses the cache.
