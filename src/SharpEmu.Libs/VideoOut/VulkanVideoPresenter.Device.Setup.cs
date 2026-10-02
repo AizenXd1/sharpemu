@@ -1197,6 +1197,11 @@ internal static unsafe partial class VulkanVideoPresenter
         private void CreatePipelineCache()
         {
             var cacheMode = Environment.GetEnvironmentVariable("SHARPEMU_VK_PIPELINE_CACHE");
+            // MoltenVK imports compile every cached MSL library. Load shader
+            // groups on demand on macOS so a mature cache cannot hold startup
+            // behind unrelated scenes. Keep explicit overrides for comparison.
+            var shardMode = Environment.GetEnvironmentVariable("SHARPEMU_VK_PIPELINE_CACHE_SHARDS");
+            var useShards = shardMode == "1" || (shardMode is null && OperatingSystem.IsMacOS());
             // Vulkan cache blobs carry the implementation's compatibility
             // header and are rejected/rebuilt below when the device or driver
             // changes. MoltenVK compilation of a large translated shader can
@@ -1204,13 +1209,9 @@ internal static unsafe partial class VulkanVideoPresenter
             // much more harmful than using Vulkan's normal persistence path.
             // Keep an explicit opt-out for diagnostics and read-only systems.
             var persistentCacheEnabled =
-                !string.Equals(cacheMode, "0", StringComparison.Ordinal);
+                !string.Equals(cacheMode, "0", StringComparison.Ordinal) &&
+                (useShards || !OperatingSystem.IsWindows() || cacheMode is "1" or "file");
             _pipelineCachePath = persistentCacheEnabled ? GetPipelineCachePath() : null;
-            // MoltenVK imports compile every cached MSL library. Load shader
-            // groups on demand on macOS so a mature cache cannot hold startup
-            // behind unrelated scenes. Keep explicit overrides for comparison.
-            var shardMode = Environment.GetEnvironmentVariable("SHARPEMU_VK_PIPELINE_CACHE_SHARDS");
-            var useShards = shardMode == "1" || (shardMode is null && OperatingSystem.IsMacOS());
             if (_pipelineCachePath is not null &&
                 useShards)
             {
@@ -1273,8 +1274,12 @@ internal static unsafe partial class VulkanVideoPresenter
             if (_pipelineCachePath is null)
             {
                 Console.Error.WriteLine(
-                    "[LOADER][INFO] Vulkan pipeline cache ready: memory-only " +
-                    "(persistence disabled with SHARPEMU_VK_PIPELINE_CACHE=0).");
+                    string.Equals(cacheMode, "0", StringComparison.Ordinal)
+                        ? "[LOADER][INFO] Vulkan pipeline cache ready: memory-only " +
+                          "(persistence disabled with SHARPEMU_VK_PIPELINE_CACHE=0)."
+                        : "[LOADER][INFO] Vulkan pipeline cache ready: memory-only " +
+                          "(the driver shader cache and the shader prewarm list replace the cache file; " +
+                          "SHARPEMU_VK_PIPELINE_CACHE=file keeps one).");
             }
             else
             {
