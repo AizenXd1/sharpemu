@@ -5718,6 +5718,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		var hostAffinityMask = MapGuestThreadAffinity(guestAffinityMask);
 		if (hostAffinityMask == 0)
 		{
+			SharpEmu.HLE.Host.HostLaneReservation.ApplyToGuestThread();
 			return;
 		}
 
@@ -6616,6 +6617,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	{
 		Console.Error.WriteLine($"[LOADER][INFO] ExecuteEntry starting at 0x{entryPoint:X16}");
 		Console.Error.WriteLine($"[LOADER][INFO] RSP=0x{context[CpuRegister.Rsp]:X16}, RDI=0x{context[CpuRegister.Rdi]:X16}");
+		SharpEmu.HLE.Host.HostLaneReservation.ApplyToGuestThread();
 		ulong num = context[CpuRegister.Rsp];
 		if (num == 0)
 		{
