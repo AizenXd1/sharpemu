@@ -5202,12 +5202,33 @@ public static partial class Gen5SpirvTranslator
             return Bitcast(_uintType, value);
         }
 
+        // Rounds an f32 toward zero onto an f16 value, so packHalf2x16 then encodes it exactly
+        // (V_CVT_PKRTZ_F16_F32). Toward zero, a finite value beyond the f16 range becomes
+        // +-65504, never infinity: Silent Hill's deferred lighting packs values past 65504 and
+        // its fog pass then scales them down, while an infinity stays infinite, turns into NaN
+        // and blacks out the whole title-menu scene. Subnormal results keep whole 2^-24 steps.
         private uint TruncateFloat32ForPack(uint value)
         {
-            var raw = BitwiseAnd(
-                Bitcast(_uintType, value),
-                UInt(0xFFFF_E000));
-            return Bitcast(_floatType, raw);
+            var normal = Bitcast(
+                _floatType,
+                BitwiseAnd(Bitcast(_uintType, Ext(43, _floatType, value, Float(-65504f), Float(65504f))), UInt(0xFFFF_E000)));
+            var subnormal = _module.AddInstruction(
+                SpirvOp.FMul,
+                _floatType,
+                Ext(3, _floatType, _module.AddInstruction(SpirvOp.FMul, _floatType, value, Float(16777216f))),
+                Float(1f / 16777216f));
+            var isSubnormal = _module.AddInstruction(
+                SpirvOp.FOrdLessThan,
+                _boolType,
+                Ext(4, _floatType, value),
+                Float(6.10351562e-05f));
+            var finite = _module.AddInstruction(SpirvOp.Select, _floatType, isSubnormal, subnormal, normal);
+            var special = _module.AddInstruction(
+                SpirvOp.LogicalOr,
+                _boolType,
+                _module.AddInstruction(SpirvOp.IsNan, _boolType, value),
+                _module.AddInstruction(SpirvOp.IsInf, _boolType, value));
+            return _module.AddInstruction(SpirvOp.Select, _floatType, special, value, finite);
         }
 
         private uint Ext(uint operation, uint resultType, params uint[] operands)
