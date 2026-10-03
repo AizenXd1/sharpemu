@@ -122,5 +122,45 @@ public sealed class FloatSemanticsDeviceTests(HeadlessVulkanFixture fixture) : I
         }
     }
 
+    // op_sel_hi marks a V_FMA_MIX operand as f16, literals included: 0x34CD is 0.3, not an
+    // f32 denormal. Silent Hill weights a luminance with such literals and divides by it.
+    [Fact]
+    public void FusedMixReadsHalfSelectedLiteralsAsHalfFloats()
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        var halfLiteral = new Gen5Vop3pControl(0, 0b001, 0, 0, false);
+        var floatLiteral = new Gen5Vop3pControl(0, 0b000, 0, 0, false);
+        var program = Program(
+            Vop1(0, "VCvtF32U32", 1, Gen5Operand.Vector(0)),
+            Vop3(4, "VFmaMixF32", 12, new Gen5Operand(Gen5OperandKind.LiteralConstant, 0x34CD), Gen5Operand.Vector(1), Operand(0)) with { Control = halfLiteral },
+            Vop3(16, "VFmaMixF32", 13, new Gen5Operand(Gen5OperandKind.LiteralConstant, Bits(0.25f)), Gen5Operand.Vector(1), Operand(0)) with { Control = floatLiteral },
+            Vop2(28, "VLshlrevB32", 7, Operand(5), Gen5Operand.Vector(0)),
+            BufferAccess(32, "BufferStoreDword", 4, vectorData: 12, offsetEnabled: true, vectorAddress: 7),
+            BufferAccess(40, "BufferStoreDword", 4, offset: 4, vectorData: 13, offsetEnabled: true, vectorAddress: 7),
+            EndProgram(48));
+        var (plan, resources, layout) = Prepare(program);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            LocalSizeX = ThreadCount, ThreadCountX = ThreadCount, WaveSize = 32,
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        using var harness = new ImageTestHarness(vulkan);
+        using var runner = new LayoutComputeRunner(harness, request, shader.Spirv);
+        var result = runner.CreateBuffer(ThreadCount * RowBytes);
+        var registers = new uint[256];
+        registers[6] = ThreadCount * RowBytes;
+        harness.Run(() => runner.Dispatch(registers,
+            new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = [result] }, 1));
+        var actual = runner.ReadBack(result, 0, ThreadCount * RowBytes);
+        var weight = (float)BitConverter.UInt16BitsToHalf(0x34CD);
+        for (var lane = 0u; lane < ThreadCount; lane++)
+        {
+            var row = actual.AsSpan((int)(lane * RowBytes));
+            Assert.Equal(Bits(MathF.FusedMultiplyAdd(weight, lane, 0f)), BinaryPrimitives.ReadUInt32LittleEndian(row));
+            Assert.Equal(Bits(lane * 0.25f), BinaryPrimitives.ReadUInt32LittleEndian(row[4..]));
+        }
+    }
+
     private static uint Bits(float value) => BitConverter.SingleToUInt32Bits(value);
 }

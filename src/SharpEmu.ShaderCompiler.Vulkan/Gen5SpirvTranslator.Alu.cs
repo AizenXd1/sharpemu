@@ -1778,8 +1778,11 @@ public static partial class Gen5SpirvTranslator
         }
 
         // Reads one V_FMA_MIX source as an f32. op_sel_hi selects whether a
-        // register operand is taken as an f16 (the half picked by op_sel, widened
-        // exactly to f32) or as a full f32; inline constants are always f32. The
+        // register or literal operand is taken as an f16 (the half picked by op_sel,
+        // widened exactly to f32) or as a full f32; inline constants keep their value
+        // either way. A literal is an f16 bit pattern then: reading 0x34CD as an f32
+        // made Silent Hill's luminance weights denormal zeros, and the lighting that
+        // divides by that luminance came out thousands of times too bright. The
         // per-operand neg_hi bit takes the absolute value and neg negates, in that
         // order (abs-then-neg), reusing the VOP3P modifier fields the way the mix
         // ops define them rather than the packed low/high-lane meaning.
@@ -1791,7 +1794,7 @@ public static partial class Gen5SpirvTranslator
             var source = instruction.Sources[index];
             var readAsHalf =
                 ((control.OpSelHiMask >> index) & 1) != 0 &&
-                source.Kind is Gen5OperandKind.VectorRegister or Gen5OperandKind.ScalarRegister;
+                source.Kind is Gen5OperandKind.VectorRegister or Gen5OperandKind.ScalarRegister or Gen5OperandKind.LiteralConstant;
 
             uint value;
             if (readAsHalf)
