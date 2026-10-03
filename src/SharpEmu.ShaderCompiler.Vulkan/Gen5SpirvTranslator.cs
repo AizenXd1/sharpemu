@@ -1453,9 +1453,11 @@ public static partial class Gen5SpirvTranslator
             var block = blocks[blockIndex];
             var halfMaskPlan = HalfMaskPlan();
             // One guest wave can span two host subgroups. Keep its shared-memory phases ordered.
-            // The half-mask plan inserts its own barriers; other wave64 programs also
-            // need LDS phase ordering when reads and writes span basic blocks.
-            var synchronizeSharedMemory = _emulateWave64 && halfMaskPlan is null;
+            // The half-mask plan's barriers only order its own mask exchanges, not the program's
+            // LDS traffic: with phase ordering off under the plan, UE's FFT bloom (wave64, 512
+            // threads, LDS butterflies) read half-written rows and blurred Silent Hill's whole
+            // post chain into a flat haze.
+            var synchronizeSharedMemory = _emulateWave64;
             var sharedMemoryPhase = SharedMemoryPhase.None;
             for (var index = block.StartIndex; index < block.EndIndex; index++)
             {
