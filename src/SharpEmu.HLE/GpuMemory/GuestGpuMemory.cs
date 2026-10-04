@@ -30,9 +30,6 @@ public sealed class GuestGpuMemory : IDisposable
     private readonly PageGuard _pages;
     private readonly ReaderWriterLockSlim _spansLock = new();
     private readonly SpanSet _spans = new();
-    private long _spanVersion;
-
-    public long SpanVersion => Interlocked.Read(ref _spanVersion);
     private sealed record GpuAttachment(IGpuQueueRelay? Gpu, IGpuTickScheduler? Scheduler);
 
     private readonly object _attachGate = new();
@@ -207,7 +204,6 @@ public sealed class GuestGpuMemory : IDisposable
         try
         {
             _spans.Add(address, size);
-            Interlocked.Increment(ref _spanVersion);
         }
         finally
         {
@@ -280,7 +276,6 @@ public sealed class GuestGpuMemory : IDisposable
                 try
                 {
                     _spans.Remove(address, size);
-                    Interlocked.Increment(ref _spanVersion);
                 }
                 finally
                 {
