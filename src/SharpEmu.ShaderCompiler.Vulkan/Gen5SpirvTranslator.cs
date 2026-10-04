@@ -8007,6 +8007,15 @@ public static partial class Gen5SpirvTranslator
                 ? value
                 : _module.AddInstruction(SpirvOp.GroupNonUniformShuffle, _uintType, UInt(3), value, lane);
 
+        // DPP row/quad operations and PERMLANE16 never cross a 32-lane half-wave.
+        // Guest lanes 32..63 belong to the second host subgroup on 32-lane devices;
+        // using those guest indices directly in OpGroupNonUniformShuffle is undefined.
+        // Preserve the current physical half on devices whose subgroup is wider than 32.
+        private uint ShuffleHalfWaveLane(uint value, uint guestLane) =>
+            _subgroupInvocationIdInput == 0 ? value : ShuffleLane(value,
+                BitwiseOr(BitwiseAnd(Load(_uintType, _subgroupInvocationIdInput), UInt(0xFFFF_FFE0)),
+                    BitwiseAnd(guestLane, UInt(31))));
+
         private uint CurrentLaneBit()
         {
             if (_subgroupInvocationIdInput == 0)
