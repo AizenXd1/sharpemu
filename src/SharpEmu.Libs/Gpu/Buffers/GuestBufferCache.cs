@@ -557,7 +557,21 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     private ulong _bdaTouchTick = ulong.MaxValue;
     private ulong _bdaTouchMapping;
 
+    public static ulong MappingKey(IReadOnlyCollection<GuestSpan> spans)
+    {
+        var mapping = (ulong)spans.Count;
+        foreach (var span in spans)
+            mapping = (mapping ^ span.Address ^ (span.Size << 17)) * 0x100000001B3UL;
+        return mapping;
+    }
+
     public void PrepareBda(IEnumerable<GuestSpan> mapped)
+    {
+        var spans = mapped as IReadOnlyCollection<GuestSpan> ?? mapped.ToList();
+        PrepareBda(spans, MappingKey(spans));
+    }
+
+    public void PrepareBda(IReadOnlyCollection<GuestSpan> mapped, ulong mapping)
     {
         var traceAddress = GuestGpuMemoryHook.TraceAddress;
         var traceCovered = false;
@@ -572,10 +586,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
         else
         {
-            var spans = mapped as IReadOnlyCollection<GuestSpan> ?? mapped.ToList();
-            var mapping = (ulong)spans.Count;
-            foreach (var span in spans)
-                mapping = (mapping ^ span.Address ^ (span.Size << 17)) * 0x100000001B3UL;
+            var spans = mapped;
             if (_retirementPolicy.CurrentTick != _bdaTouchTick || mapping != _bdaTouchMapping)
             {
                 foreach (var span in spans)
