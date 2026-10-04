@@ -139,6 +139,9 @@ public static class AudioOut2Exports
             return ahead <= 0 ? 0 : (uint)Math.Min((ahead + GrainTicks - 1) / GrainTicks, QueueDepth);
         }
 
+        public double DeviceSlotFreeMilliseconds =>
+            DeviceSlotFreeThreshold(GrainSamples, Frequency, QueueDepth);
+
         // Grains the device holds beyond the cushion, at most QueueDepth.
         public uint DeviceQueuedGrains(int queuedMilliseconds)
         {
@@ -429,6 +432,14 @@ public static class AudioOut2Exports
         if (submitted)
         {
             context.DevicePaced = true;
+        }
+
+        if (submitted || advancedGrain == 1)
+        {
+            if (blocking != 0)
+            {
+                WaitForDeviceSlot(context);
+            }
         }
         else
         {
@@ -1093,6 +1104,28 @@ public static class AudioOut2Exports
 
             backendName = SecondaryBackendName;
             return SecondaryBackend;
+        }
+    }
+
+    internal static double DeviceSlotFreeThreshold(uint grainSamples, uint frequency, uint queueDepth) =>
+        DeviceCushionMilliseconds + (grainSamples * 1000.0 / frequency * Math.Max((long)queueDepth - 1, 0));
+
+    private static void WaitForDeviceSlot(ContextState context)
+    {
+        var backend = ResolveContextBackend(context, out _);
+        if (backend is null)
+        {
+            return;
+        }
+
+        var limit = context.DeviceSlotFreeMilliseconds;
+        var deadline = Stopwatch.GetTimestamp() + (Stopwatch.Frequency / 4);
+        int queued;
+        while ((queued = backend.QueuedMilliseconds) > limit &&
+               Stopwatch.GetTimestamp() < deadline &&
+               !HostSessionControl.IsShutdownRequested)
+        {
+            Thread.Sleep((int)Math.Clamp(Math.Ceiling(queued - limit), 1, 50));
         }
     }
 
