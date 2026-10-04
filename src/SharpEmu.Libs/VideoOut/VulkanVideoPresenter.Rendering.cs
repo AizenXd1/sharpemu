@@ -1200,5 +1200,8 @@ internal static unsafe partial class VulkanVideoPresenter
             _bufferCache.FillDccMetadata(address, size, fillValue);
             return true;
         }
+
+        public bool TryCopyWordsOnHost(ulong destination, ulong source, ulong sourceWords, ulong words) =>
+            _bufferCache.TryCopyWordsOnHost(destination, source, sourceWords, words);
     }
 }
