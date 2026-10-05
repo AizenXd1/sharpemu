@@ -6589,6 +6589,20 @@ public static partial class Gen5SpirvTranslator
                 outputValue,
                 Load(_vec4Type, outputVariable));
             Store(outputVariable, outputValue);
+            if (export.Target == 12 && _invalidPositionClipDistance != uint.MaxValue)
+            {
+                var equal = _module.AddInstruction(
+                    SpirvOp.FOrdEqual,
+                    _module.TypeVector(_boolType, 4),
+                    outputValue,
+                    _module.ConstantNull(_vec4Type));
+                var invalid = _module.AddInstruction(SpirvOp.All, _boolType, equal);
+                // A zero position has an undefined perspective divide. Collapse its primitive
+                // to the remaining edge, as the guest's clipping-error cull does.
+                var distance = _module.AddInstruction(
+                    SpirvOp.Select, _floatType, invalid, Float(-1f), Float(0f));
+                StoreDistanceConditional(_clipDistanceOutput, _invalidPositionClipDistance, distance);
+            }
             return true;
         }
 
