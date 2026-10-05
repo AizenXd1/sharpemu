@@ -301,7 +301,7 @@ public static partial class ImageRequestBuilders
         description.Samples = samples;
         description.TileMode = tile;
         var metadataAddress = descriptor.MetadataAddress << 8;
-        if (!storage && samples == 1 && levels == 1 && tile == GuestTileMode.RenderTarget && descriptor.MetadataCompress &&
+        if (!storage && type == GuestImageType.Color2D && samples == 1 && levels == 1 && tile == GuestTileMode.RenderTarget && descriptor.MetadataCompress &&
             metadataAddress != 0 && metadataAddress < TrackerLayout.SpaceBytes)
         {
             description.Metadata.Kind = MetadataKind.Dcc;
