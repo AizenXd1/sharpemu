@@ -126,6 +126,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool _supportsDepthClipControl;
         private bool _supportsDepthClipEnable;
         private bool _supportsDepthBounds;
+        private bool _supportsShaderClipDistance;
         private bool _supportsFillRectangle;
         private RenderHostLimits _renderHostLimits;
         private IGuestBackedSpace _guestBacking = null!;

@@ -742,6 +742,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _supportsIndependentBlend = supportedFeatures.IndependentBlend;
             _supportsDepthBiasClamp = supportedFeatures.DepthBiasClamp;
             _supportsDepthBounds = supportedFeatures.DepthBounds;
+            _supportsShaderClipDistance = supportedFeatures.ShaderClipDistance;
             _supportsFillRectangle = IsDeviceExtensionAvailable(FillRectangleExtensionName);
             var enabledFeatures = new PhysicalDeviceFeatures
             {
