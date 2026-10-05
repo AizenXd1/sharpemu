@@ -375,13 +375,17 @@ internal static unsafe partial class VulkanVideoPresenter
             var command = BeginBatchedGuestCommands();
             var buffers = stackalloc VkBuffer[bindings.Length];
             var offsets = stackalloc ulong[bindings.Length];
+            var sizes = stackalloc ulong[bindings.Length];
             for (var index = 0; index < bindings.Length; index++)
             {
                 buffers[index] = new VkBuffer(bindings[index].Handle);
                 offsets[index] = bindings[index].Offset;
+                var vertex = input.Buffers[index];
+                sizes[index] = vertex.Size == 0 ? 0 : ClampMappedSize(vertex.Address, vertex.Size);
             }
 
-            _vk.CmdBindVertexBuffers(command, 0, (uint)bindings.Length, buffers, offsets);
+            // Keep guest descriptor bounds even when the cache merges neighboring allocations.
+            _vk.CmdBindVertexBuffers2(command, 0, (uint)bindings.Length, buffers, offsets, sizes, null);
         }
 
         public void BindIndexBuffer(BufferBinding binding, IndexType type) =>
