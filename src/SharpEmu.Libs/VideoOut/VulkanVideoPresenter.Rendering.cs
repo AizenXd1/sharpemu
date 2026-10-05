@@ -607,7 +607,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     _vk.CmdClearColorImage(command, image.Backing.Handle, ImageLayout.TransferDstOptimal, &clearValue, 1, &vkRange);
                     if (!tracked)
                     {
-                        _bufferCache.FillBuffer(guestSlice, sliceSize, uint.MaxValue, false);
+                        _bufferCache.FillDccMetadata(guestSlice, sliceSize, uint.MaxValue);
                         if (RenderTrace.Enabled && RenderTrace.MetadataClear())
                         {
                             RenderTrace.Write(
