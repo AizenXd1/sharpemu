@@ -898,9 +898,17 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
         if (!_relay.IsGpuQueueThread && GuestReadsAwaitOffQueue && (AsyncReadback is not null || MainQueuePendingReads))
         {
-            PendingDownload? pending = null;
-            if (_relay.TryRunOnGpuQueue(() => pending = BeginReadMemoryOnGpu(guestAddress, size, isWrite, source, allowPending: true)))
+            // A GPU write that lands after the copy was recorded makes the read stale. Retrying
+            // synchronously stalls the command worker until the GPU drains, so re-issue the read and
+            // wait here again; only the last attempt falls back to the synchronous read.
+            for (var attempt = 1; ; attempt++)
             {
+                PendingDownload? pending = null;
+                if (!_relay.TryRunOnGpuQueue(() => pending = BeginReadMemoryOnGpu(guestAddress, size, isWrite, source, allowPending: true)))
+                {
+                    return AwaitShutdown();
+                }
+
                 if (pending is null)
                 {
                     return true;
@@ -915,13 +923,18 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                     _scheduler.WaitForSubmittedTick(pending.MainQueueTick);
                 }
 
-                if (_relay.TryRunOnGpuQueue(() => CompleteReadMemoryOnGpu(pending, retrySynchronously: true)))
+                var finalAttempt = attempt >= PendingReadAttempts;
+                var applied = false;
+                if (!_relay.TryRunOnGpuQueue(() => applied = CompleteReadMemoryOnGpu(pending, retrySynchronously: finalAttempt)))
+                {
+                    return AwaitShutdown();
+                }
+
+                if (applied || finalAttempt)
                 {
                     return true;
                 }
             }
-
-            return AwaitShutdown();
         }
 
         var onQueue = _relay.IsGpuQueueThread;
@@ -1306,6 +1319,9 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     private static readonly bool MainQueuePendingReads =
         Environment.GetEnvironmentVariable("SHARPEMU_MAIN_QUEUE_PENDING_READS") != "0";
+
+    // Pending reads a guest thread re-issues before it lets the worker read synchronously.
+    private const int PendingReadAttempts = 4;
 
     private bool CompleteReadMemoryOnGpu(PendingDownload pending, bool retrySynchronously)
     {
