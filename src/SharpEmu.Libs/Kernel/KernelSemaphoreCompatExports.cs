@@ -577,6 +577,35 @@ public static class KernelSemaphoreCompatExports
     }
 
     [SysAbiExport(
+        Nid = "fjN6NQHhK8k",
+        ExportName = "scePthreadSemTimedwait",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadSemTimedWait(CpuContext ctx)
+    {
+        var timeoutUsec = unchecked((uint)ctx[CpuRegister.Rsi]);
+        if (!TryGetPosixSemaphoreHandle(ctx, ctx[CpuRegister.Rdi], out var handle))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        if (!_semaphores.TryGetValue(handle, out var semaphore))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
+        }
+
+        return WaitSemaphoreCore(
+            ctx,
+            semaphore,
+            handle,
+            needCount: 1,
+            hasTimeout: true,
+            timeoutAddress: 0,
+            timeoutUsec,
+            "scePthreadSemTimedwait");
+    }
+
+    [SysAbiExport(
         Nid = "w5IHyvahg-o",
         ExportName = "sem_timedwait",
         Target = Generation.Gen4 | Generation.Gen5,
