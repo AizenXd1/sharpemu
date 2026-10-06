@@ -215,14 +215,29 @@ public static class KernelSyncOnAddressCompatExports
     {
         var address = ctx[CpuRegister.Rdi];
         var requested = unchecked((int)ctx[CpuRegister.Rsi]);
+        return Wake(ctx, address, requested, usePosixResult: false);
+    }
+
+    private static int Wake(
+        CpuContext ctx,
+        ulong address,
+        int requested,
+        bool usePosixResult)
+    {
         if (address == 0 || (address & 3) != 0 || requested < 0)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return CompleteResult(
+                ctx,
+                (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT,
+                usePosixResult);
         }
 
         if (requested == 0)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+            return CompleteResult(
+                ctx,
+                (int)OrbisGen2Result.ORBIS_GEN2_OK,
+                usePosixResult);
         }
 
         List<SyncWaiter>? selected = null;
@@ -294,7 +309,10 @@ public static class KernelSyncOnAddressCompatExports
             GuestThreadExecution.CurrentGuestThreadHandle,
             Environment.CurrentManagedThreadId);
 
-        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+        return CompleteResult(
+            ctx,
+            (int)OrbisGen2Result.ORBIS_GEN2_OK,
+            usePosixResult);
     }
 
     private static void CaptureCallStack(
@@ -339,15 +357,15 @@ public static class KernelSyncOnAddressCompatExports
     private static int Wait(CpuContext ctx, bool is64Bit)
     {
         var address = ctx[CpuRegister.Rdi];
+        var expected = is64Bit
+            ? ctx[CpuRegister.Rsi]
+            : unchecked((uint)ctx[CpuRegister.Rsi]);
         var alignmentMask = is64Bit ? 7UL : 3UL;
         if (address == 0 || (address & alignmentMask) != 0)
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        var expected = is64Bit
-            ? ctx[CpuRegister.Rsi]
-            : unchecked((uint)ctx[CpuRegister.Rsi]);
         if (!TryReadValue(ctx, address, is64Bit, out var current))
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
@@ -369,28 +387,92 @@ public static class KernelSyncOnAddressCompatExports
                 return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
 
-            if (timeoutMicroseconds == 0)
-            {
-                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT);
-            }
-
             timeout = TimeSpan.FromTicks((long)timeoutMicroseconds * 10L);
             deadline = GuestThreadExecution.ComputeDeadlineTimestamp(timeout.Value);
         }
 
-        var waiter = new SyncWaiter(ctx, address, expected, is64Bit);
+        return WaitCore(
+            ctx,
+            is64Bit,
+            address,
+            expected,
+            timeout,
+            deadline,
+            usePosixResult: false,
+            reason: is64Bit
+                ? "sceKernelSyncOnAddressWait64"
+                : "sceKernelSyncOnAddressWait32");
+    }
+
+    private static int WaitCore(
+        CpuContext ctx,
+        bool is64Bit,
+        ulong address,
+        ulong expected,
+        TimeSpan? timeout,
+        long deadline,
+        bool usePosixResult,
+        string reason)
+    {
+        var alignmentMask = is64Bit ? 7UL : 3UL;
+        if (address == 0 || (address & alignmentMask) != 0)
+        {
+            return CompleteResult(
+                ctx,
+                (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT,
+                usePosixResult);
+        }
+
+        if (!TryReadValue(ctx, address, is64Bit, out var current))
+        {
+            return CompleteResult(
+                ctx,
+                (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT,
+                usePosixResult);
+        }
+
+        if (current != expected)
+        {
+            KernelSyncOnAddressProfile.RecordImmediate(address);
+            return CompleteResult(
+                ctx,
+                (int)OrbisGen2Result.ORBIS_GEN2_OK,
+                usePosixResult);
+        }
+
+        if (timeout == TimeSpan.Zero)
+        {
+            return CompleteResult(
+                ctx,
+                (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT,
+                usePosixResult);
+        }
+
+        var waiter = new SyncWaiter(
+            ctx,
+            address,
+            expected,
+            is64Bit,
+            usePosixResult,
+            deadline);
         Register(address, waiter);
         if (!TryReadValue(ctx, address, is64Bit, out current))
         {
             Unregister(waiter);
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return CompleteResult(
+                ctx,
+                (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT,
+                usePosixResult);
         }
 
         if (current != expected || waiter.TryWake())
         {
             Unregister(waiter);
             KernelSyncOnAddressProfile.RecordImmediate(address);
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+            return CompleteResult(
+                ctx,
+                (int)OrbisGen2Result.ORBIS_GEN2_OK,
+                usePosixResult);
         }
 
         var returnRip = 0UL;
@@ -418,7 +500,7 @@ public static class KernelSyncOnAddressCompatExports
 
         if (GuestThreadExecution.RequestCurrentThreadBlock(
                 ctx,
-                is64Bit ? "sceKernelSyncOnAddressWait64" : "sceKernelSyncOnAddressWait32",
+                reason,
                 waiter.WakeKey,
                 waiter,
                 deadline))
