@@ -847,52 +847,55 @@ public static class KernelEventQueueCompatExports
         }
 
         var waiterId = Interlocked.Increment(ref _nextEventQueueWaiterId);
-        if (timeoutAddress == 0)
-        {
-            var requestedBlock = GuestThreadExecution.RequestCurrentThreadBlock(
-                ctx,
-                "sceKernelWaitEqueue",
-                state.WakeKey,
-                new EqueueWaiter
-                {
-                    Ctx = ctx,
-                    State = state,
-                    EventsAddress = eventsAddress,
-                    EventCapacity = eventCapacity,
-                    OutCountAddress = outCountAddress,
-                    WaiterId = waiterId,
-                });
-            if (requestedBlock)
+        var blockDeadlineTimestamp = timeoutAddress == 0
+            ? 0
+            : GuestThreadExecution.ComputeDeadlineTimestamp(
+                TimeSpan.FromMicroseconds(timeoutUsec));
+        var requestedBlock = GuestThreadExecution.RequestCurrentThreadBlock(
+            ctx,
+            "sceKernelWaitEqueue",
+            state.WakeKey,
+            new EqueueWaiter
             {
-                var wakeAfterRegistration = false;
-                lock (_eventQueueGate)
-                {
-                    wakeAfterRegistration =
-                        !IsLiveEventQueueLocked(state) ||
-                        HasPendingEventsLocked(state.Handle);
-                }
-
-                if (wakeAfterRegistration)
-                {
-                    WakeEventQueue(
-                        state,
-                        _logEqueue
-                            ? "source=post-registration-state-check"
-                            : null);
-                }
-
-                if (_logEqueue)
-                {
-                    TraceEventQueue(
-                        ctx,
-                        "wait-block",
-                        handle,
-                        $"generation={state.Generation} waiter={waiterId} " +
-                        $"capacity={eventCapacity} timeout=infinite " +
-                        $"events=0x{eventsAddress:X16} out_count=0x{outCountAddress:X16}");
-                }
-                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                Ctx = ctx,
+                State = state,
+                EventsAddress = eventsAddress,
+                EventCapacity = eventCapacity,
+                OutCountAddress = outCountAddress,
+                WaiterId = waiterId,
+            },
+            blockDeadlineTimestamp);
+        if (requestedBlock)
+        {
+            var wakeAfterRegistration = false;
+            lock (_eventQueueGate)
+            {
+                wakeAfterRegistration =
+                    !IsLiveEventQueueLocked(state) ||
+                    HasPendingEventsLocked(state.Handle);
             }
+
+            if (wakeAfterRegistration)
+            {
+                WakeEventQueue(
+                    state,
+                    _logEqueue
+                        ? "source=post-registration-state-check"
+                        : null);
+            }
+
+            if (_logEqueue)
+            {
+                TraceEventQueue(
+                    ctx,
+                    "wait-block",
+                    handle,
+                    $"generation={state.Generation} waiter={waiterId} " +
+                    $"capacity={eventCapacity} timeout=" +
+                    (timeoutAddress == 0 ? "infinite " : $"{timeoutUsec}_usec ") +
+                    $"events=0x{eventsAddress:X16} out_count=0x{outCountAddress:X16}");
+            }
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
         if (timeoutAddress != 0)
