@@ -362,6 +362,35 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
     }
 
     [Fact]
+    public void DepthTarget_CompressedStencilRequiresHtileBacking()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        const ulong stencilBase = Base + 0x80000;
+        const ulong htileBase = Base + 0x100000;
+        var words = RegisterWords.Depth(Base, 64, 64, stencilBase: stencilBase) with
+        {
+            ZInfo = (uint)GuestDepthFormat.Z32Float | (1u << 29),
+            StencilInfo = 0x00100981,
+            HtileBase = htileBase,
+        };
+
+        var resolution = ImageRequestBuilders.DepthTarget(words, _vulkan.DeviceInfo);
+
+        Assert.NotNull(resolution);
+        var value = resolution.Value;
+        Assert.True(value.HasStencil);
+        Assert.True(value.HasHtile);
+        Assert.Equal(MetadataKind.Htile, value.Request.Description.Metadata.Kind);
+        Assert.Equal(htileBase, value.Request.Description.Metadata.Range.Address);
+        Assert.True(value.Request.Description.Metadata.StencilCompressed);
+
+        using var fatal = new FatalScope();
+        var missingHtile = words with { ZInfo = (uint)GuestDepthFormat.Z32Float, HtileBase = 0 };
+        Assert.Throws<SchedulerFatalException>(() => ImageRequestBuilders.DepthTarget(missingHtile, _vulkan.DeviceInfo));
+        Assert.Contains("stencil attachment state", Assert.Single(fatal.Messages));
+    }
+
+    [Fact]
     public void DepthTarget_NoAttachmentWhenNothingIsActive()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
