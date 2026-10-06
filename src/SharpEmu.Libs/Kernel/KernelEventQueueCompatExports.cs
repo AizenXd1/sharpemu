@@ -161,20 +161,43 @@ public static class KernelEventQueueCompatExports
         }
 
         public bool Remove(ulong ident, short filter)
+            => RemoveAll(ident, filter) != 0;
+
+        public int RemoveAll(ulong ident, short filter)
         {
-            var index = FindIndex(ident, filter);
-            if (index < 0)
+            var originalCount = Count;
+            var writeIndex = 0;
+            for (var readIndex = 0; readIndex < originalCount; readIndex++)
             {
-                return false;
+                var candidate = this[readIndex];
+                if (candidate.Ident == ident && candidate.Filter == filter)
+                {
+                    continue;
+                }
+
+                this[writeIndex++] = candidate;
             }
 
-            for (var i = index; i + 1 < Count; i++)
+            Count = writeIndex;
+            return originalCount - writeIndex;
+        }
+
+        public int UpdateUserData(ulong ident, short filter, ulong userData)
+        {
+            var updatedCount = 0;
+            for (var index = 0; index < Count; index++)
             {
-                this[i] = this[i + 1];
+                var candidate = this[index];
+                if (candidate.Ident != ident || candidate.Filter != filter)
+                {
+                    continue;
+                }
+
+                this[index] = candidate with { UserData = userData };
+                updatedCount++;
             }
 
-            Count--;
-            return true;
+            return updatedCount;
         }
     }
 
@@ -1296,7 +1319,7 @@ public static class KernelEventQueueCompatExports
 
             if (_pendingEvents.TryGetValue(handle, out var pending))
             {
-                _ = pending.Remove(ident, filter);
+                _ = pending.RemoveAll(ident, filter);
             }
 
             return true;
