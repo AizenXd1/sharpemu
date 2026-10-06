@@ -362,7 +362,7 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
     }
 
     [Fact]
-    public void DepthTarget_CompressedStencilRequiresHtileBacking()
+    public void DepthTarget_StencilIsCompressedOnlyWithHtileBacking()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
         const ulong stencilBase = Base + 0x80000;
@@ -384,10 +384,13 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         Assert.Equal(htileBase, value.Request.Description.Metadata.Range.Address);
         Assert.True(value.Request.Description.Metadata.StencilCompressed);
 
-        using var fatal = new FatalScope();
         var missingHtile = words with { ZInfo = (uint)GuestDepthFormat.Z32Float, HtileBase = 0 };
-        Assert.Throws<SchedulerFatalException>(() => ImageRequestBuilders.DepthTarget(missingHtile, _vulkan.DeviceInfo));
-        Assert.Contains("stencil attachment state", Assert.Single(fatal.Messages));
+        var uncompressed = ImageRequestBuilders.DepthTarget(missingHtile, _vulkan.DeviceInfo);
+
+        Assert.NotNull(uncompressed);
+        Assert.True(uncompressed.Value.HasStencil);
+        Assert.False(uncompressed.Value.HasHtile);
+        Assert.False(uncompressed.Value.Request.Description.Metadata.StencilCompressed);
     }
 
     [Fact]
