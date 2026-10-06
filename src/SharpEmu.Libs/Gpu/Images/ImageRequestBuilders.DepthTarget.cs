@@ -58,7 +58,8 @@ public static partial class ImageRequestBuilders
         return Format.Undefined;
     }
 
-    private static bool HtileStencilCompatible(bool hasStencil, bool hasHtile, bool htileStencilDisabled) => !hasStencil || !hasHtile || htileStencilDisabled;
+    private static bool HtileStencilCompatible(bool hasStencil, bool hasHtile, bool htileStencilDisabled) =>
+        !hasStencil || htileStencilDisabled || hasHtile;
 
     // Builds the request for the bound depth target. Null when no depth or stencil state is active.
     public static DepthTargetResolution? DepthTarget(in DepthTargetWords depthWords, IImageFormatSupport device) =>
