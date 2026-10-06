@@ -15,6 +15,23 @@ public static class NpWebApi2Exports
     private static int _nextUserContextHandle = 1000;
     private static readonly object _contextGate = new();
     private static readonly HashSet<int> _libraryContexts = [];
+    private static readonly HashSet<int> _userContexts = [];
+    private static readonly HashSet<int> _pushEventFilters = [];
+
+    public static void ResetRuntimeState()
+    {
+        Interlocked.Exchange(ref _initialized, 0);
+        Interlocked.Exchange(ref _nextLibraryContextHandle, 0);
+        Interlocked.Exchange(ref _nextPushEventHandle, 0);
+        Interlocked.Exchange(ref _nextPushEventCallbackHandle, 0);
+        Interlocked.Exchange(ref _nextUserContextHandle, 1000);
+        lock (_contextGate)
+        {
+            _libraryContexts.Clear();
+            _userContexts.Clear();
+            _pushEventFilters.Clear();
+        }
+    }
 
     [SysAbiExport(
         Nid = "+o9816YQhqQ",
@@ -51,6 +68,11 @@ public static class NpWebApi2Exports
         }
 
         var filterHandle = Interlocked.Increment(ref _nextPushEventHandle);
+        lock (_contextGate)
+        {
+            _pushEventFilters.Add(filterHandle);
+        }
+
         TraceNpWebApi2("push-event-create-filter", libraryContextId, (ulong)filterHandle);
         return ctx.SetReturn(filterHandle);
     }
@@ -97,6 +119,11 @@ public static class NpWebApi2Exports
         }
 
         var userContextId = Interlocked.Increment(ref _nextUserContextHandle);
+        lock (_contextGate)
+        {
+            _userContexts.Add(userContextId);
+        }
+
         return ctx.SetReturn(userContextId);
     }
 
@@ -171,6 +198,8 @@ public static class NpWebApi2Exports
             if (_libraryContexts.Count == 0)
             {
                 Interlocked.Exchange(ref _initialized, 0);
+                _userContexts.Clear();
+                _pushEventFilters.Clear();
             }
         }
     }
