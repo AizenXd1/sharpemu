@@ -336,10 +336,15 @@ public sealed class CommandStreamQueue
     // Publishes a failure: nothing runs any more and every waiter is released with Failed.
     public void Fail()
     {
+        Action[] cancellations;
         lock (_gate)
         {
             FailLocked();
+            cancellations = CancelControlBarriersLocked();
         }
+
+        foreach (var cancel in cancellations)
+            cancel();
     }
 
     private void FailLocked()
