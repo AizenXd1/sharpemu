@@ -1167,9 +1167,10 @@ public static class KernelEventQueueCompatExports
             }
 
             var key = (ident, filter);
+            var isExistingRegistration = events.ContainsKey(key);
             var isNewReadRegistration =
                 filter == KernelEventFilterRead &&
-                !events.ContainsKey(key);
+                !isExistingRegistration;
             events[(ident, filter)] = new KernelEventRegistration(
                 ident,
                 filter,
@@ -1178,6 +1179,11 @@ public static class KernelEventQueueCompatExports
                 lowWater,
                 unchecked((ulong)Interlocked.Increment(
                     ref _nextEventRegistrationGeneration)));
+            if (isExistingRegistration &&
+                _pendingEvents.TryGetValue(handle, out var pending))
+            {
+                _ = pending.UpdateUserData(ident, filter, userData);
+            }
             if (isNewReadRegistration)
             {
                 _readEventRegistrationCount++;
