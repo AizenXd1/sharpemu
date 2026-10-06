@@ -574,6 +574,11 @@ public static class KernelPthreadExtendedCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+	private static bool IsValidStackBounds(ulong stackAddress, ulong stackSize) =>
+		stackAddress != 0 &&
+		stackSize != 0 &&
+		stackAddress <= ulong.MaxValue - stackSize;
+
 	private static bool TryInferNativeGuestStack(ulong stackPointer, out ulong stackAddress)
 	{
 		stackAddress = 0;
