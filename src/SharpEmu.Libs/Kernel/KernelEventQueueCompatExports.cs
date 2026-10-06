@@ -1419,22 +1419,13 @@ public static class KernelEventQueueCompatExports
                         _pendingEvents[handle] = queue;
                     }
 
-                    // Keep each interrupt as a separate event. Limit growth when the queue is not read.
-                    var queuedEvent = new KernelQueuedEvent(
+                    queue.AddLast(new KernelQueuedEvent(
                         registration.Ident,
                         registration.Filter,
                         registration.Flags,
                         1,
                         data,
-                        registration.UserData);
-                    if (CountPendingEvents(queue, registration.Ident, registration.Filter) < 256)
-                    {
-                        queue.AddLast(queuedEvent);
-                    }
-                    else
-                    {
-                        QueueOrUpdateEvent(queue, queuedEvent);
-                    }
+                        registration.UserData));
 
                     (wakeQueues ??= []).Add(state);
                     triggeredCount++;
@@ -1660,24 +1651,6 @@ public static class KernelEventQueueCompatExports
         {
             ArrayPool<KernelQueuedEvent>.Shared.Return(events);
         }
-    }
-
-    private static int CountPendingEvents(
-        KernelEventDeque queue,
-        ulong ident,
-        short filter)
-    {
-        var count = 0;
-        for (var i = 0; i < queue.Count; i++)
-        {
-            var pending = queue[i];
-            if (pending.Ident == ident && pending.Filter == filter)
-            {
-                count++;
-            }
-        }
-
-        return count;
     }
 
     private static void PollReadEvents(object? state)
