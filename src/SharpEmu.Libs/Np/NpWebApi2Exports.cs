@@ -12,6 +12,7 @@ public static class NpWebApi2Exports
     private static int _initialized;
     private static int _nextLibraryContextHandle;
     private static int _nextPushEventHandle;
+    private static int _nextPushEventCallbackHandle;
     private static int _nextUserContextHandle = 1000;
     private static readonly object _contextGate = new();
     private static readonly HashSet<int> _libraryContexts = [];
@@ -142,6 +143,26 @@ public static class NpWebApi2Exports
     }
 
     [SysAbiExport(
+        Nid = "fY3QqeNkF8k",
+        ExportName = "sceNpWebApi2PushEventRegisterCallback",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpWebApi2")]
+    public static int NpWebApi2PushEventRegisterCallback(CpuContext ctx)
+    {
+        var userContextId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var filterId = unchecked((int)ctx[CpuRegister.Rsi]);
+        var callback = ctx[CpuRegister.Rdx];
+        if (callback == 0 || !IsRegisteredPushEventPair(userContextId, filterId))
+        {
+            return ctx.SetReturn(NpWebApi2ErrorInvalidArgument);
+        }
+
+        var callbackId = Interlocked.Increment(ref _nextPushEventCallbackHandle);
+        TraceNpWebApi2("push-event-register-callback", userContextId, (ulong)callbackId);
+        return ctx.SetReturn(callbackId);
+    }
+
+    [SysAbiExport(
         Nid = "bEvXpcEk200",
         ExportName = "sceNpWebApi2Terminate",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -215,6 +236,19 @@ public static class NpWebApi2Exports
                 _userContexts.Clear();
                 _pushEventFilters.Clear();
             }
+        }
+    }
+
+    private static bool IsRegisteredPushEventPair(int userContextId, int filterId)
+    {
+        if (Volatile.Read(ref _initialized) == 0 || userContextId <= 0 || filterId <= 0)
+        {
+            return false;
+        }
+
+        lock (_contextGate)
+        {
+            return _userContexts.Contains(userContextId) && _pushEventFilters.Contains(filterId);
         }
     }
 
