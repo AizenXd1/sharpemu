@@ -10,23 +10,44 @@ namespace SharpEmu.Libs.Kernel;
 // Wake selects a fixed number of registered waiters at the same address.
 public static class KernelSyncOnAddressCompatExports
 {
+    private const int UmtxOperationWait = 2;
+    private const int UmtxOperationWake = 3;
+    private const int PosixEperm = 1;
+    private const int PosixEacces = 13;
+    private const int PosixEfault = 14;
+    private const int PosixEinval = 22;
+    private const int PosixEagain = 35;
+    private const int PosixEtimedout = 60;
+    private const int PosixEcanceled = 85;
+    private const int PosixEother = 1062;
+
     private sealed class SyncWaiter : IGuestThreadBlockWaiter
     {
         private readonly CpuContext _context;
         private readonly ulong _expected;
         private readonly bool _is64Bit;
+        private readonly bool _usePosixResult;
+        private readonly long _deadlineTimestamp;
         private readonly object _hostGate = new();
         private readonly long _registeredTicks;
         private readonly int _registeredManagedThread;
         private int _wakeRequested;
         private int _resumeRecorded;
 
-        public SyncWaiter(CpuContext context, ulong address, ulong expected, bool is64Bit)
+        public SyncWaiter(
+            CpuContext context,
+            ulong address,
+            ulong expected,
+            bool is64Bit,
+            bool usePosixResult,
+            long deadlineTimestamp)
         {
             _context = context;
             Address = address;
             _expected = expected;
             _is64Bit = is64Bit;
+            _usePosixResult = usePosixResult;
+            _deadlineTimestamp = deadlineTimestamp;
             _registeredTicks = KernelSyncOnAddressProfile.Enabled
                 ? Stopwatch.GetTimestamp()
                 : 0L;
@@ -50,13 +71,13 @@ public static class KernelSyncOnAddressCompatExports
             if (Volatile.Read(ref _wakeRequested) != 0)
             {
                 RecordResume(explicitWake: true, valueChanged: false, timedOut: false, faulted: false);
-                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                return Complete((int)OrbisGen2Result.ORBIS_GEN2_OK);
             }
 
             if (!TryReadValue(_context, Address, _is64Bit, out var value))
             {
                 RecordResume(explicitWake: false, valueChanged: false, timedOut: false, faulted: true);
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                return Complete((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
 
             var valueChanged = value != _expected;
@@ -65,15 +86,21 @@ public static class KernelSyncOnAddressCompatExports
                 valueChanged,
                 timedOut: !valueChanged,
                 faulted: false);
-            return valueChanged
+            var result = valueChanged
                 ? (int)OrbisGen2Result.ORBIS_GEN2_OK
                 : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
+            return Complete(result);
         }
 
         public bool TryWake() => Volatile.Read(ref _wakeRequested) != 0;
 
         public bool RequestWake()
         {
+            if (_deadlineTimestamp != 0 && Stopwatch.GetTimestamp() >= _deadlineTimestamp)
+            {
+                return false;
+            }
+
             if (Interlocked.Exchange(ref _wakeRequested, 1) != 0)
             {
                 return false;
@@ -122,6 +149,10 @@ public static class KernelSyncOnAddressCompatExports
 
             return Resume();
         }
+
+        private int Complete(int result) => _usePosixResult
+            ? SetPosixReturn(_context, result)
+            : result;
 
         private void RecordResume(
             bool explicitWake,
@@ -457,5 +488,32 @@ public static class KernelSyncOnAddressCompatExports
     {
         ctx[CpuRegister.Rax] = unchecked((ulong)(long)result);
         return result;
+    }
+
+    private static int CompleteResult(CpuContext ctx, int result, bool usePosixResult) =>
+        usePosixResult
+            ? SetPosixReturn(ctx, result)
+            : SetReturn(ctx, result);
+
+    private static int SetPosixReturn(CpuContext ctx, int result)
+    {
+        if (result == (int)OrbisGen2Result.ORBIS_GEN2_OK)
+        {
+            return SetReturn(ctx, 0);
+        }
+
+        var errno = result switch
+        {
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED => PosixEperm,
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DELETED => PosixEacces,
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT => PosixEfault,
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT => PosixEinval,
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN => PosixEagain,
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT => PosixEtimedout,
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED => PosixEcanceled,
+            _ => PosixEother,
+        };
+        _ = KernelRuntimeCompatExports.TrySetErrno(ctx, errno);
+        return SetReturn(ctx, -1);
     }
 }
