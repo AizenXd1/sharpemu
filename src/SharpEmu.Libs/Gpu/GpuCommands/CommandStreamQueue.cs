@@ -39,6 +39,7 @@ public sealed class CommandStreamQueue
     private readonly GpuCommandInterpreter?[] _interpreters = new GpuCommandInterpreter?[QueueCount];
     private int _nextQueue;
     private int _submissionCount;
+    private ulong _admissionOrdinal;
     private bool _accepting = true;
     private bool _stopping;
     private bool _processing;
@@ -200,6 +201,7 @@ public sealed class CommandStreamQueue
             throw _host.Fatal($"The command stream no longer accepts submissions: queue={submission.QueueId} address=0x{submission.Address:X16}.");
         }
 
+        submission.AdmissionOrdinal = ++_admissionOrdinal;
         _queues[submission.QueueId].AddLast(submission);
         _submissionCount++;
         if (submission.Kind is not (CommandSubmissionKind.FlipPreparation or CommandSubmissionKind.FrameBoundary))
