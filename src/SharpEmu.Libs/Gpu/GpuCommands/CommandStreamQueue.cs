@@ -664,12 +664,17 @@ public sealed class CommandStreamQueue
     // Drops every submission without stopping admission; the presenter uses it after device loss.
     public void DiscardAll()
     {
+        Action[] cancellations;
         lock (_gate)
         {
             _outcome = IdleOutcome.Failed;
             DropAllLocked();
+            cancellations = CancelControlBarriersLocked();
             Monitor.PulseAll(_gate);
         }
+
+        foreach (var cancel in cancellations)
+            cancel();
     }
 
     // A diagnostic view of the blocked heads: their count, the oldest age and one sample.
