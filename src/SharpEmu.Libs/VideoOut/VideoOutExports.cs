@@ -398,15 +398,18 @@ public static partial class VideoOutExports
     public static int VideoOutClose(CpuContext ctx)
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        lock (_stateGate)
+        GuestGpu.Current.RunAfterPendingCommandStreams(() =>
         {
-            foreach (var request in _flipRequests.Values.Where(request => request.Handle == handle).ToArray())
+            lock (_stateGate)
             {
-                CancelFlipLocked(request);
+                foreach (var request in _flipRequests.Values.Where(request => request.Handle == handle).ToArray())
+                {
+                    CancelFlipLocked(request);
+                }
+                _ports.Remove(handle);
+                Monitor.PulseAll(_stateGate);
             }
-            _ports.Remove(handle);
-            Monitor.PulseAll(_stateGate);
-        }
+        });
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
