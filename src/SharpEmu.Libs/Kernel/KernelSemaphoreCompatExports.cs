@@ -328,7 +328,7 @@ public static class KernelSemaphoreCompatExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
         }
 
-        if (signalCount <= 0)
+        if (signalCount < 0)
         {
             signalTrace.Record(SemaphoreSignalProfile.Stage.Rejected,
                 result: (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
