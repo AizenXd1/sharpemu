@@ -97,6 +97,20 @@ public static class NpWebApi2Exports
     }
 
     [SysAbiExport(
+        Nid = "fIATVMo4Y1w",
+        ExportName = "sceNpWebApi2PushEventDeleteHandle",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpWebApi2")]
+    public static int NpWebApi2PushEventDeleteHandle(CpuContext ctx)
+    {
+        TraceNpWebApi2(
+            "push-event-delete-handle",
+            unchecked((int)ctx[CpuRegister.Rdi]),
+            unchecked((uint)ctx[CpuRegister.Rsi]));
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
         Nid = "sk54bi6FtYM",
         ExportName = "sceNpWebApi2CreateUserContext",
         Target = Generation.Gen4 | Generation.Gen5,
