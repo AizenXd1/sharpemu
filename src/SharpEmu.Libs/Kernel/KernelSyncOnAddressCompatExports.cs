@@ -207,6 +207,80 @@ public static class KernelSyncOnAddressCompatExports
     public static int SyncOnAddressWait64(CpuContext ctx) => Wait(ctx, is64Bit: true);
 
     [SysAbiExport(
+        Nid = "04AjkP0jO9U",
+        ExportName = "_umtx_op",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int UmtxOp(CpuContext ctx)
+    {
+        var address = ctx[CpuRegister.Rdi];
+        var operation = unchecked((int)ctx[CpuRegister.Rsi]);
+        var value = ctx[CpuRegister.Rdx];
+        var secondaryAddress = ctx[CpuRegister.Rcx];
+        var timeoutAddress = ctx[CpuRegister.R8];
+
+        if (secondaryAddress != 0)
+        {
+            return SetPosixReturn(
+                ctx,
+                (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        switch (operation)
+        {
+            case UmtxOperationWait:
+            {
+                TimeSpan? timeout = null;
+                long deadline = 0;
+                if (timeoutAddress != 0)
+                {
+                    if (!ctx.TryReadUInt64(timeoutAddress, out var secondsBits) ||
+                        !ctx.TryReadUInt64(timeoutAddress + sizeof(long), out var nanosecondsBits))
+                    {
+                        return SetPosixReturn(
+                            ctx,
+                            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                    }
+
+                    var seconds = unchecked((long)secondsBits);
+                    var nanoseconds = unchecked((long)nanosecondsBits);
+                    if (seconds < 0 || nanoseconds < 0 || nanoseconds >= 1_000_000_000L)
+                    {
+                        return SetPosixReturn(
+                            ctx,
+                            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+                    }
+
+                    timeout = CreateTimespecDuration(seconds, nanoseconds);
+                    deadline = GuestThreadExecution.ComputeDeadlineTimestamp(timeout.Value);
+                }
+
+                return WaitCore(
+                    ctx,
+                    is64Bit: true,
+                    address,
+                    value,
+                    timeout,
+                    deadline,
+                    usePosixResult: true,
+                    reason: "_umtx_op.wait");
+            }
+
+            case UmtxOperationWake:
+                return Wake(
+                    ctx,
+                    address,
+                    unchecked((int)value),
+                    usePosixResult: true);
+
+            default:
+                return SetPosixReturn(
+                    ctx,
+                    (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+    }
+
+    [SysAbiExport(
         Nid = "q2y-wDIVWZA",
         ExportName = "sceKernelSyncOnAddressWake",
         Target = Generation.Gen4 | Generation.Gen5,
