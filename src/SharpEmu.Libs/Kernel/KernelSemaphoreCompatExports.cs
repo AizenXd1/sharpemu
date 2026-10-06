@@ -73,7 +73,7 @@ public static class KernelSemaphoreCompatExports
             Count = initialCount,
         };
 
-        if (!TryWriteUInt32(ctx, semaphoreAddress, handle))
+        if (!ctx.TryWriteUInt64(semaphoreAddress, handle))
         {
             _semaphores.TryRemove(handle, out _);
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
