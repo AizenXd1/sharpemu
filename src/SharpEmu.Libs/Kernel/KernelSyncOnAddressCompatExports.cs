@@ -114,37 +114,41 @@ public static class KernelSyncOnAddressCompatExports
             return true;
         }
 
-        public int WaitOnHost(TimeSpan? timeout)
+        public int WaitOnHost()
         {
-            if (Volatile.Read(ref _wakeRequested) == 0)
+            while (Volatile.Read(ref _wakeRequested) == 0)
             {
-                lock (_hostGate)
+                if (!TryReadValue(_context, Address, _is64Bit, out var current) ||
+                    current != _expected)
                 {
-                    if (timeout is null)
-                    {
-                        while (Volatile.Read(ref _wakeRequested) == 0)
-                        {
-                            Monitor.Wait(_hostGate);
-                        }
-                    }
-                    else
-                    {
-                        var deadline = Stopwatch.GetTimestamp() +
-                            (long)Math.Ceiling(timeout.Value.TotalSeconds * Stopwatch.Frequency);
-                        while (Volatile.Read(ref _wakeRequested) == 0)
-                        {
-                            var remainingTicks = deadline - Stopwatch.GetTimestamp();
-                            if (remainingTicks <= 0)
-                            {
-                                break;
-                            }
+                    break;
+                }
 
-                            var remaining = TimeSpan.FromSeconds(
-                                remainingTicks / (double)Stopwatch.Frequency);
-                            Monitor.Wait(_hostGate, remaining);
-                        }
+                var waitSlice = TimeSpan.FromMilliseconds(10);
+                if (_deadlineTimestamp != 0)
+                {
+                    var remainingTicks = _deadlineTimestamp - Stopwatch.GetTimestamp();
+                    if (remainingTicks <= 0)
+                    {
+                        break;
+                    }
+
+                    var remainingSeconds = remainingTicks / (double)Stopwatch.Frequency;
+                    if (remainingSeconds < waitSlice.TotalSeconds)
+                    {
+                        waitSlice = TimeSpan.FromSeconds(remainingSeconds);
                     }
                 }
+
+                lock (_hostGate)
+                {
+                    if (Volatile.Read(ref _wakeRequested) == 0)
+                    {
+                        Monitor.Wait(_hostGate, waitSlice);
+                    }
+                }
+
+                GuestThreadExecution.Scheduler?.DeliverPendingGuestExceptionIfReady(_context);
             }
 
             return Resume();
@@ -424,7 +428,24 @@ public static class KernelSyncOnAddressCompatExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
         }
 
-        return SetReturn(ctx, waiter.WaitOnHost(timeout));
+        return SetReturn(ctx, waiter.WaitOnHost());
+    }
+
+    private static TimeSpan CreateTimespecDuration(long seconds, long nanoseconds)
+    {
+        var subsecondTicks = (nanoseconds + 99L) / 100L;
+        if (seconds > TimeSpan.MaxValue.Ticks / TimeSpan.TicksPerSecond)
+        {
+            return TimeSpan.MaxValue;
+        }
+
+        var secondTicks = seconds * TimeSpan.TicksPerSecond;
+        if (secondTicks > TimeSpan.MaxValue.Ticks - subsecondTicks)
+        {
+            return TimeSpan.MaxValue;
+        }
+
+        return TimeSpan.FromTicks(secondTicks + subsecondTicks);
     }
 
     private static void Register(ulong address, SyncWaiter waiter)
